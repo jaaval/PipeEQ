@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=org.pipeeq.Daemon1
+Exec=@PIPEEQ_DAEMON_PATH@

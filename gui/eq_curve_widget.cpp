@@ -1,0 +1,163 @@
+#include "eq_curve_widget.h"
+
+#include <algorithm>
+#include <cmath>
+
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPainterPath>
+#include <QWheelEvent>
+
+namespace pipeeq {
+
+namespace {
+
+eqcore::EqChain buildChain(const std::vector<eqcore::EqBand>& bands, double sampleRateHz) {
+    eqcore::EqChain chain(1, sampleRateHz);
+    chain.setBandCount(bands.size());
+    for (std::size_t i = 0; i < bands.size(); ++i) {
+        chain.setBand(i, bands[i]);
+    }
+    return chain;
+}
+
+} // namespace
+
+EqCurveWidget::EqCurveWidget(QWidget* parent) : QWidget(parent) {
+    setMinimumHeight(160);
+    setMouseTracking(true);
+}
+
+void EqCurveWidget::setBands(const std::vector<eqcore::EqBand>& bands) {
+    bands_ = bands;
+    update();
+}
+
+QRectF EqCurveWidget::plotRect() const {
+    constexpr double margin = 12.0;
+    return QRectF(margin, margin, width() - 2 * margin, height() - 2 * margin);
+}
+
+double EqCurveWidget::freqToX(double freqHz) const {
+    const double logMin = std::log10(kMinFreqHz);
+    const double logMax = std::log10(kMaxFreqHz);
+    const double t = (std::log10(std::clamp(freqHz, kMinFreqHz, kMaxFreqHz)) - logMin) / (logMax - logMin);
+    const QRectF r = plotRect();
+    return r.left() + t * r.width();
+}
+
+double EqCurveWidget::xToFreq(double x) const {
+    const QRectF r = plotRect();
+    const double t = std::clamp((x - r.left()) / r.width(), 0.0, 1.0);
+    const double logMin = std::log10(kMinFreqHz);
+    const double logMax = std::log10(kMaxFreqHz);
+    return std::pow(10.0, logMin + t * (logMax - logMin));
+}
+
+double EqCurveWidget::gainToY(double gainDb) const {
+    const double t = (std::clamp(gainDb, -kMaxGainDb, kMaxGainDb) + kMaxGainDb) / (2.0 * kMaxGainDb);
+    const QRectF r = plotRect();
+    return r.bottom() - t * r.height();
+}
+
+double EqCurveWidget::yToGain(double y) const {
+    const QRectF r = plotRect();
+    const double t = std::clamp((r.bottom() - y) / r.height(), 0.0, 1.0);
+    return t * 2.0 * kMaxGainDb - kMaxGainDb;
+}
+
+int EqCurveWidget::hitTestBand(QPointF pos) const {
+    int best = -1;
+    double bestDist = kHitRadiusPx;
+    for (std::size_t i = 0; i < bands_.size(); ++i) {
+        const QPointF p(freqToX(bands_[i].freqHz), gainToY(bands_[i].gainDb));
+        const double dist = QLineF(p, pos).length();
+        if (dist <= bestDist) {
+            bestDist = dist;
+            best = static_cast<int>(i);
+        }
+    }
+    return best;
+}
+
+void EqCurveWidget::paintEvent(QPaintEvent* /*event*/) {
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing);
+
+    const QRectF r = plotRect();
+    painter.fillRect(rect(), palette().base());
+    painter.setPen(QPen(palette().mid().color(), 1));
+    painter.drawRect(r);
+
+    painter.setPen(QPen(palette().mid().color(), 1, Qt::DotLine));
+    for (double freq : {100.0, 1000.0, 10000.0}) {
+        const double x = freqToX(freq);
+        painter.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()));
+    }
+    for (double gain : {-12.0, 0.0, 12.0}) {
+        const double y = gainToY(gain);
+        painter.drawLine(QPointF(r.left(), y), QPointF(r.right(), y));
+    }
+    painter.setPen(QPen(palette().text().color(), 1.5));
+    painter.drawLine(QPointF(r.left(), gainToY(0.0)), QPointF(r.right(), gainToY(0.0)));
+
+    if (!bands_.empty()) {
+        const eqcore::EqChain chain = buildChain(bands_, kSampleRateHz);
+
+        QPainterPath path;
+        const int steps = static_cast<int>(r.width());
+        for (int i = 0; i <= steps; ++i) {
+            const double x = r.left() + i;
+            const double db = chain.frequencyResponseDb(xToFreq(x));
+            const double y = gainToY(db);
+            if (i == 0) {
+                path.moveTo(x, y);
+            } else {
+                path.lineTo(x, y);
+            }
+        }
+        painter.setPen(QPen(palette().highlight().color(), 2));
+        painter.drawPath(path);
+    }
+
+    for (std::size_t i = 0; i < bands_.size(); ++i) {
+        const QPointF p(freqToX(bands_[i].freqHz), gainToY(bands_[i].gainDb));
+        painter.setBrush(palette().highlight());
+        painter.setPen(QPen(palette().text().color(), 1));
+        painter.drawEllipse(p, 5, 5);
+        painter.drawText(p + QPointF(7, -7), QString::number(i + 1));
+    }
+}
+
+void EqCurveWidget::mousePressEvent(QMouseEvent* event) {
+    draggingIndex_ = hitTestBand(event->position());
+}
+
+void EqCurveWidget::mouseMoveEvent(QMouseEvent* event) {
+    if (draggingIndex_ < 0 || draggingIndex_ >= static_cast<int>(bands_.size())) {
+        return;
+    }
+    eqcore::EqBand& band = bands_[static_cast<std::size_t>(draggingIndex_)];
+    band.freqHz = xToFreq(event->position().x());
+    band.gainDb = std::clamp(yToGain(event->position().y()), -kMaxGainDb, kMaxGainDb);
+    update();
+    emit bandEdited(draggingIndex_, band);
+}
+
+void EqCurveWidget::mouseReleaseEvent(QMouseEvent* /*event*/) {
+    draggingIndex_ = -1;
+}
+
+void EqCurveWidget::wheelEvent(QWheelEvent* event) {
+    const int index = hitTestBand(event->position());
+    if (index < 0) {
+        return;
+    }
+    eqcore::EqBand& band = bands_[static_cast<std::size_t>(index)];
+    const double steps = event->angleDelta().y() / 120.0;
+    band.q = std::clamp(band.q * std::pow(1.1, steps), 0.1, 10.0);
+    update();
+    emit bandEdited(index, band);
+}
+
+} // namespace pipeeq

@@ -1,0 +1,13 @@
+[Unit]
+Description=PipeEQ per-output audio routing, volume and EQ daemon
+After=pipewire.service pipewire-session-manager.service wireplumber.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=@PIPEEQ_DAEMON_PATH@
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
