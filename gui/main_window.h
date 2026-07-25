@@ -32,6 +32,7 @@ private slots:
     void onMuteToggled(bool checked);
     void onBandCountChanged(int count);
     void onCurveBandEdited(int index, eqcore::EqBand band);
+    void onCopyEqClicked();
     void onDaemonRouteChanged(const QString& routeId);
     void refreshRoutes();
     void refreshDevices();
@@ -54,6 +55,7 @@ private:
     QSlider* gainSlider_ = nullptr;
     QLabel* gainLabel_ = nullptr;
     QSpinBox* bandCountSpin_ = nullptr;
+    QPushButton* copyEqButton_ = nullptr;
     QTableWidget* bandTable_ = nullptr;
     EqCurveWidget* curveWidget_ = nullptr;
     QLabel* statusLabel_ = nullptr;

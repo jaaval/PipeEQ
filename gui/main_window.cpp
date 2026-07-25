@@ -4,6 +4,8 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -75,6 +77,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), dbus_(new DbusCli
     gainLabel_->setMinimumWidth(60);
     bandCountSpin_ = new QSpinBox();
     bandCountSpin_->setRange(0, 16);
+    copyEqButton_ = new QPushButton("Copy EQ to...");
 
     controlsRow->addWidget(muteCheck_);
     controlsRow->addWidget(new QLabel("Gain:"));
@@ -82,6 +85,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), dbus_(new DbusCli
     controlsRow->addWidget(gainLabel_);
     controlsRow->addWidget(new QLabel("Bands:"));
     controlsRow->addWidget(bandCountSpin_);
+    controlsRow->addWidget(copyEqButton_);
     rightLayout->addLayout(controlsRow);
 
     bandTable_ = new QTableWidget(0, 4);
@@ -109,6 +113,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), dbus_(new DbusCli
     connect(muteCheck_, &QCheckBox::toggled, this, &MainWindow::onMuteToggled);
     connect(gainSlider_, &QSlider::valueChanged, this, &MainWindow::onGainSliderChanged);
     connect(bandCountSpin_, &QSpinBox::valueChanged, this, &MainWindow::onBandCountChanged);
+    connect(copyEqButton_, &QPushButton::clicked, this, &MainWindow::onCopyEqClicked);
     connect(curveWidget_, &EqCurveWidget::bandEdited, this, &MainWindow::onCurveBandEdited);
     connect(dbus_, &DbusClient::routeChanged, this, &MainWindow::onDaemonRouteChanged);
 
@@ -203,6 +208,66 @@ void MainWindow::onCurveBandEdited(int index, eqcore::EqBand band) {
     auto* typeCombo = qobject_cast<QComboBox*>(bandTable_->cellWidget(index, 0));
     const QString wire = typeCombo ? kFilterTypeOptions[typeCombo->currentIndex()].wire : "peaking";
     dbus_->setRouteBand(currentRouteId_, static_cast<uint32_t>(index), wire, band.freqHz, band.gainDb, band.q);
+}
+
+void MainWindow::onCopyEqClicked() {
+    if (currentRouteId_.isEmpty()) {
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle("Copy EQ to other outputs");
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel("Apply this output's EQ curve to:"));
+
+    auto* list = new QListWidget(&dialog);
+    for (const auto& r : routes_) {
+        if (r.id == currentRouteId_) {
+            continue;
+        }
+        auto* item = new QListWidgetItem(r.displayName.isEmpty() ? r.deviceName : r.displayName);
+        item->setData(Qt::UserRole, r.id);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(Qt::Unchecked);
+        list->addItem(item);
+    }
+
+    if (list->count() == 0) {
+        statusLabel_->setText("No other outputs to copy the EQ to.");
+        return;
+    }
+
+    layout->addWidget(list);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    const std::vector<eqcore::EqBand> bands = curveWidget_->bands();
+    int appliedCount = 0;
+    for (int i = 0; i < list->count(); ++i) {
+        const QListWidgetItem* item = list->item(i);
+        if (item->checkState() != Qt::Checked) {
+            continue;
+        }
+        const QString targetId = item->data(Qt::UserRole).toString();
+        dbus_->setRouteBandCount(targetId, static_cast<uint32_t>(bands.size()));
+        for (std::size_t b = 0; b < bands.size(); ++b) {
+            const eqcore::EqBand& band = bands[b];
+            const QString wire = kFilterTypeOptions[static_cast<int>(band.type)].wire;
+            dbus_->setRouteBand(targetId, static_cast<uint32_t>(b), wire, band.freqHz, band.gainDb, band.q);
+        }
+        ++appliedCount;
+    }
+
+    if (appliedCount > 0) {
+        statusLabel_->setText(QString("Copied EQ to %1 output(s).").arg(appliedCount));
+    }
 }
 
 void MainWindow::onDaemonRouteChanged(const QString& /*routeId*/) {
