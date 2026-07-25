@@ -18,8 +18,13 @@ DbusClient::DbusClient(QObject* parent) : QObject(parent) {
     // "default bus" resolution, which (like plain `busctl` with no --user
     // flag) can resolve to the system bus in some environments - the daemon
     // only ever registers on the session bus.
+#if SDBUSCPP_MAJOR_VERSION >= 2
     proxy_ = sdbus::createProxy(sdbus::createSessionBusConnection(), sdbus::ServiceName{eqcore::dbus::kServiceName},
                                  sdbus::ObjectPath{eqcore::dbus::kObjectPath});
+#else
+    proxy_ = sdbus::createProxy(sdbus::createSessionBusConnection(), std::string(eqcore::dbus::kServiceName),
+                                 std::string(eqcore::dbus::kObjectPath));
+#endif
 
     proxy_->uponSignal(eqcore::dbus::kSignalRouteChanged)
         .onInterface(eqcore::dbus::kInterfaceName)

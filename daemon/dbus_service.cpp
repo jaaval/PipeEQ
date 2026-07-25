@@ -44,6 +44,7 @@ void DbusService::start() {
         }
     }
 
+#if SDBUSCPP_MAJOR_VERSION >= 2
     connection_ = sdbus::createSessionBusConnection(sdbus::ServiceName{eqcore::dbus::kServiceName});
     object_ = sdbus::createObject(*connection_, sdbus::ObjectPath{eqcore::dbus::kObjectPath});
 
@@ -75,6 +76,55 @@ void DbusService::start() {
             sdbus::registerSignal(eqcore::dbus::kSignalDevicesChanged),
             sdbus::registerSignal(eqcore::dbus::kSignalRouteChanged).withParameters<std::string>())
         .forInterface(sdbus::InterfaceName{eqcore::dbus::kInterfaceName});
+#else
+    // sdbus-c++ 1.x: no strong ServiceName/ObjectPath/InterfaceName types, and
+    // no addVTable() - each method/signal is registered individually, then
+    // finalized with finishRegistration().
+    connection_ = sdbus::createSessionBusConnection(std::string(eqcore::dbus::kServiceName));
+    object_ = sdbus::createObject(*connection_, std::string(eqcore::dbus::kObjectPath));
+
+    object_->registerMethod(eqcore::dbus::kMethodListDevices)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs([this] { return listDevices(); });
+    object_->registerMethod(eqcore::dbus::kMethodListRoutes)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs([this] { return listRoutes(); });
+    object_->registerMethod(eqcore::dbus::kMethodGetState)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs([this] { return getState(); });
+    object_->registerMethod(eqcore::dbus::kMethodGetRouteBands)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs([this](std::string routeId) { return getRouteBands(routeId); });
+    object_->registerMethod(eqcore::dbus::kMethodAddRoute)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs(
+            [this](std::string deviceName, std::string displayName) { return addRoute(deviceName, displayName); });
+    object_->registerMethod(eqcore::dbus::kMethodRemoveRoute)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs([this](std::string routeId) { removeRoute(routeId); });
+    object_->registerMethod(eqcore::dbus::kMethodSetRouteGain)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs([this](std::string routeId, double gainDb) { return setRouteGain(routeId, gainDb); });
+    object_->registerMethod(eqcore::dbus::kMethodSetRouteMute)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs([this](std::string routeId, bool muted) { return setRouteMute(routeId, muted); });
+    object_->registerMethod(eqcore::dbus::kMethodSetRouteBandCount)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs(
+            [this](std::string routeId, uint32_t count) { return setRouteBandCount(routeId, count); });
+    object_->registerMethod(eqcore::dbus::kMethodSetRouteBand)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs([this](std::string routeId, uint32_t index, std::string type, double freqHz,
+                               double gainDb, double q) {
+            return setRouteBand(routeId, index, type, freqHz, gainDb, q);
+        });
+    object_->registerSignal(eqcore::dbus::kSignalDevicesChanged).onInterface(eqcore::dbus::kInterfaceName);
+    object_->registerSignal(eqcore::dbus::kSignalRouteChanged)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .withParameters<std::string>();
+
+    object_->finishRegistration();
+#endif
 
     connection_->enterEventLoopAsync();
 

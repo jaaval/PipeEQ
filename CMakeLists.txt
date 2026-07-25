@@ -20,6 +20,17 @@ find_package(nlohmann_json REQUIRED)
 find_package(sdbus-c++ REQUIRED)
 find_package(Threads REQUIRED)
 
+# sdbus-c++ 2.0 was a breaking API rewrite (strong ServiceName/ObjectPath/
+# InterfaceName types, addVTable() replacing per-item registerMethod()+
+# finishRegistration()). Distro-shipped versions vary a lot - e.g. Arch has
+# 2.x, Ubuntu/Pop!_OS 24.04 ships 1.x - so both call shapes are compiled in,
+# selected via this macro, rather than requiring a specific version.
+if(NOT DEFINED sdbus-c++_VERSION_MAJOR)
+    message(FATAL_ERROR "find_package(sdbus-c++) did not report a version; can't select the correct API shape")
+endif()
+message(STATUS "Building against sdbus-c++ ${sdbus-c++_VERSION} (major version ${sdbus-c++_VERSION_MAJOR})")
+add_compile_definitions(SDBUSCPP_MAJOR_VERSION=${sdbus-c++_VERSION_MAJOR})
+
 add_subdirectory(common)
 add_subdirectory(daemon)
 add_subdirectory(packaging)
