@@ -9,12 +9,15 @@
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QInputDialog>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QTabWidget>
 #include <QTableWidget>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -75,27 +78,61 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), dbus_(new DbusCli
     gainSlider_->setRange(-60, 12);
     gainLabel_ = new QLabel("0 dB");
     gainLabel_->setMinimumWidth(60);
-    bandCountSpin_ = new QSpinBox();
-    bandCountSpin_->setRange(0, 16);
-    copyEqButton_ = new QPushButton("Copy EQ to...");
 
     controlsRow->addWidget(muteCheck_);
     controlsRow->addWidget(new QLabel("Gain:"));
     controlsRow->addWidget(gainSlider_, 1);
     controlsRow->addWidget(gainLabel_);
-    controlsRow->addWidget(new QLabel("Bands:"));
-    controlsRow->addWidget(bandCountSpin_);
-    controlsRow->addWidget(copyEqButton_);
     rightLayout->addLayout(controlsRow);
+
+    detailTabs_ = new QTabWidget();
+
+    // --- EQ tab ---
+    auto* eqTab = new QWidget();
+    auto* eqLayout = new QVBoxLayout(eqTab);
+
+    auto* eqControlsRow = new QHBoxLayout();
+    bandCountSpin_ = new QSpinBox();
+    bandCountSpin_->setRange(0, 16);
+    copyEqButton_ = new QPushButton("Copy EQ to...");
+    eqControlsRow->addWidget(new QLabel("Bands:"));
+    eqControlsRow->addWidget(bandCountSpin_);
+    eqControlsRow->addStretch(1);
+    eqControlsRow->addWidget(copyEqButton_);
+    eqLayout->addLayout(eqControlsRow);
 
     bandTable_ = new QTableWidget(0, 4);
     bandTable_->setHorizontalHeaderLabels({"Type", "Freq (Hz)", "Gain (dB)", "Q"});
     bandTable_->horizontalHeader()->setStretchLastSection(true);
     bandTable_->setMaximumHeight(200);
-    rightLayout->addWidget(bandTable_);
+    eqLayout->addWidget(bandTable_);
 
     curveWidget_ = new EqCurveWidget();
-    rightLayout->addWidget(curveWidget_, 1);
+    eqLayout->addWidget(curveWidget_, 1);
+
+    detailTabs_->addTab(eqTab, "EQ");
+
+    // --- Mixer tab ---
+    auto* mixerTab = new QWidget();
+    auto* mixerLayout = new QVBoxLayout(mixerTab);
+
+    auto* mixerControlsRow = new QHBoxLayout();
+    addInputButton_ = new QPushButton("Add Input...");
+    removeInputButton_ = new QPushButton("Remove Selected Input");
+    mixerControlsRow->addWidget(addInputButton_);
+    mixerControlsRow->addWidget(removeInputButton_);
+    mixerControlsRow->addStretch(1);
+    mixerLayout->addLayout(mixerControlsRow);
+
+    mixerTable_ = new QTableWidget(0, 3);
+    mixerTable_->setHorizontalHeaderLabels({"Input", "On", "Level (dB)"});
+    mixerTable_->horizontalHeader()->setStretchLastSection(true);
+    mixerTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    mixerLayout->addWidget(mixerTable_, 1);
+
+    detailTabs_->addTab(mixerTab, "Mixer");
+
+    rightLayout->addWidget(detailTabs_, 1);
 
     auto* rightContainer = new QWidget();
     rightContainer->setLayout(rightLayout);
@@ -115,9 +152,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), dbus_(new DbusCli
     connect(bandCountSpin_, &QSpinBox::valueChanged, this, &MainWindow::onBandCountChanged);
     connect(copyEqButton_, &QPushButton::clicked, this, &MainWindow::onCopyEqClicked);
     connect(curveWidget_, &EqCurveWidget::bandEdited, this, &MainWindow::onCurveBandEdited);
+    connect(addInputButton_, &QPushButton::clicked, this, &MainWindow::onAddInputClicked);
+    connect(removeInputButton_, &QPushButton::clicked, this, &MainWindow::onRemoveInputClicked);
     connect(dbus_, &DbusClient::routeChanged, this, &MainWindow::onDaemonRouteChanged);
+    connect(dbus_, &DbusClient::inputsChanged, this, &MainWindow::onDaemonInputsChanged);
 
     refreshDevices();
+    refreshInputs();
     refreshRoutes();
 
     auto* pollTimer = new QTimer(this);
@@ -155,6 +196,7 @@ void MainWindow::onRouteSelectionChanged() {
         currentRouteId_.clear();
         bandTable_->setRowCount(0);
         curveWidget_->setBands({});
+        mixerTable_->setRowCount(0);
         return;
     }
     currentRouteId_ = item->data(Qt::UserRole).toString();
@@ -270,8 +312,41 @@ void MainWindow::onCopyEqClicked() {
     }
 }
 
+void MainWindow::onAddInputClicked() {
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, "Add Input", "Name for the new input (e.g. \"Music\"):",
+                                                 QLineEdit::Normal, QString(), &ok);
+    if (!ok || name.trimmed().isEmpty()) {
+        return;
+    }
+    const QString inputId = dbus_->addInput(name.trimmed());
+    if (inputId.isEmpty()) {
+        statusLabel_->setText("Failed to add input - is pipeeq-daemon running?");
+        return;
+    }
+    refreshInputs();
+}
+
+void MainWindow::onRemoveInputClicked() {
+    const int row = mixerTable_->currentRow();
+    if (row < 0) {
+        return;
+    }
+    QTableWidgetItem* nameItem = mixerTable_->item(row, 0);
+    if (!nameItem) {
+        return;
+    }
+    const QString inputId = nameItem->data(Qt::UserRole).toString();
+    dbus_->removeInput(inputId);
+    refreshInputs();
+}
+
 void MainWindow::onDaemonRouteChanged(const QString& /*routeId*/) {
     refreshRoutes();
+}
+
+void MainWindow::onDaemonInputsChanged() {
+    refreshInputs();
 }
 
 void MainWindow::refreshRoutes() {
@@ -308,6 +383,13 @@ void MainWindow::refreshDevices() {
                                             : QString("%1 output device(s) available").arg(devices_.size()));
 }
 
+void MainWindow::refreshInputs() {
+    inputs_ = dbus_->listInputs();
+    if (!currentRouteId_.isEmpty()) {
+        rebuildMixerTable();
+    }
+}
+
 void MainWindow::selectRoute(const QString& routeId) {
     for (int i = 0; i < routeList_->count(); ++i) {
         QListWidgetItem* item = routeList_->item(i);
@@ -329,6 +411,8 @@ void MainWindow::loadRouteDetail(const RouteRow& route) {
     const auto bands = dbus_->getRouteBands(route.id);
     rebuildBandTable(bands);
     curveWidget_->setBands(bands);
+
+    rebuildMixerTable();
 }
 
 void MainWindow::rebuildBandTable(const std::vector<eqcore::EqBand>& bands) {
@@ -372,6 +456,55 @@ void MainWindow::rebuildBandTable(const std::vector<eqcore::EqBand>& bands) {
     suppressSignals_ = false;
 }
 
+void MainWindow::rebuildMixerTable() {
+    if (currentRouteId_.isEmpty()) {
+        mixerTable_->setRowCount(0);
+        return;
+    }
+
+    const auto activeGains = dbus_->getRouteInputGains(currentRouteId_);
+
+    suppressSignals_ = true;
+    mixerTable_->setRowCount(static_cast<int>(inputs_.size()));
+
+    for (int row = 0; row < static_cast<int>(inputs_.size()); ++row) {
+        const InputRow& input = inputs_[static_cast<std::size_t>(row)];
+
+        auto* nameItem = new QTableWidgetItem(input.displayName);
+        nameItem->setData(Qt::UserRole, input.id);
+        nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
+        mixerTable_->setItem(row, 0, nameItem);
+
+        double gainDb = -60.0;
+        bool active = false;
+        for (const auto& [id, db] : activeGains) {
+            if (id == input.id) {
+                active = true;
+                gainDb = db;
+                break;
+            }
+        }
+
+        auto* onCheck = new QCheckBox();
+        onCheck->setChecked(active);
+        mixerTable_->setCellWidget(row, 1, onCheck);
+
+        auto* levelSlider = new QSlider(Qt::Horizontal);
+        levelSlider->setRange(-60, 12);
+        levelSlider->setValue(static_cast<int>(std::lround(gainDb)));
+        levelSlider->setEnabled(active);
+        mixerTable_->setCellWidget(row, 2, levelSlider);
+
+        connect(onCheck, &QCheckBox::toggled, this, [this, row, levelSlider](bool checked) {
+            levelSlider->setEnabled(checked);
+            pushMixerRow(row);
+        });
+        connect(levelSlider, &QSlider::valueChanged, this, [this, row](int) { pushMixerRow(row); });
+    }
+
+    suppressSignals_ = false;
+}
+
 void MainWindow::pushBandRow(int row) {
     if (suppressSignals_ || currentRouteId_.isEmpty()) {
         return;
@@ -399,6 +532,26 @@ void MainWindow::pushBandRow(int row) {
     if (row >= 0 && row < static_cast<int>(bands.size())) {
         bands[static_cast<std::size_t>(row)] = band;
         curveWidget_->setBands(bands);
+    }
+}
+
+void MainWindow::pushMixerRow(int row) {
+    if (suppressSignals_ || currentRouteId_.isEmpty()) {
+        return;
+    }
+
+    QTableWidgetItem* nameItem = mixerTable_->item(row, 0);
+    auto* onCheck = qobject_cast<QCheckBox*>(mixerTable_->cellWidget(row, 1));
+    auto* levelSlider = qobject_cast<QSlider*>(mixerTable_->cellWidget(row, 2));
+    if (!nameItem || !onCheck || !levelSlider) {
+        return;
+    }
+
+    const QString inputId = nameItem->data(Qt::UserRole).toString();
+    if (onCheck->isChecked()) {
+        dbus_->setRouteInputGain(currentRouteId_, inputId, levelSlider->value());
+    } else {
+        dbus_->removeRouteInput(currentRouteId_, inputId);
     }
 }
 

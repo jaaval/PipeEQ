@@ -4,19 +4,11 @@
 #include <cstdio>
 #include <string_view>
 
-#include <spa/param/audio/format-utils.h>
-#include <spa/pod/builder.h>
 #include <spa/utils/dict.h>
 
 namespace pipeeq {
 
 namespace {
-
-const pw_stream_events kCaptureStreamEvents = {
-    .version = PW_VERSION_STREAM_EVENTS,
-    .state_changed = AudioEngine::onCaptureStateChanged,
-    .process = AudioEngine::onCaptureProcess,
-};
 
 const pw_registry_events kRegistryEvents = {
     .version = PW_VERSION_REGISTRY_EVENTS,
@@ -39,37 +31,9 @@ void AudioEngine::start() {
     pw_thread_loop_start(loop_);
 
     pw_thread_loop_lock(loop_);
-
     core_ = pw_context_connect(context_, nullptr, 0);
-
     registry_ = pw_core_get_registry(core_, PW_VERSION_REGISTRY, 0);
     pw_registry_add_listener(registry_, &registryListener_, &kRegistryEvents, this);
-
-    pw_properties* props =
-        pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_CLASS,
-                           "Audio/Sink", PW_KEY_NODE_NAME, "pipeeq_sink", PW_KEY_NODE_DESCRIPTION,
-                           "PipeEQ Virtual Sink", nullptr);
-
-    captureStream_ = pw_stream_new(core_, "pipeeq capture", props);
-    pw_stream_add_listener(captureStream_, &captureListener_, &kCaptureStreamEvents, this);
-
-    uint8_t buffer[1024];
-    spa_pod_builder podBuilder = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-
-    spa_audio_info_raw info{};
-    info.format = SPA_AUDIO_FORMAT_F32;
-    info.channels = static_cast<uint32_t>(kNumChannels);
-    info.rate = kSampleRateHz;
-
-    const spa_pod* params[1];
-    params[0] = spa_format_audio_raw_build(&podBuilder, SPA_PARAM_EnumFormat, &info);
-
-    pw_stream_connect(
-        captureStream_, PW_DIRECTION_INPUT, PW_ID_ANY,
-        static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS |
-                                      PW_STREAM_FLAG_RT_PROCESS),
-        params, 1);
-
     pw_thread_loop_unlock(loop_);
 }
 
@@ -80,10 +44,7 @@ void AudioEngine::stop() {
 
     pw_thread_loop_lock(loop_);
     routes_.clear();
-    if (captureStream_) {
-        pw_stream_destroy(captureStream_);
-        captureStream_ = nullptr;
-    }
+    inputs_.clear();
     if (core_) {
         pw_core_disconnect(core_);
         core_ = nullptr;
@@ -105,6 +66,46 @@ std::vector<DeviceInfo> AudioEngine::listDevices() const {
     return devices_;
 }
 
+std::string AudioEngine::addInput(const std::string& displayName) {
+    const std::string inputId = "input-" + std::to_string(nextInputIndex_++);
+
+    pw_thread_loop_lock(loop_);
+    inputs_.push_back(
+        std::make_unique<InputSource>(core_, inputId, displayName, kNumChannels, kSampleRateHz));
+    pw_thread_loop_unlock(loop_);
+
+    return inputId;
+}
+
+void AudioEngine::removeInput(const std::string& inputId) {
+    // Clear this input's slot on every route first, so no route keeps a
+    // (harmless but pointless) reference after the InputSource is gone.
+    for (auto& route : routes_) {
+        route->removeInputSlot(inputId);
+    }
+
+    pw_thread_loop_lock(loop_);
+    inputs_.erase(std::remove_if(inputs_.begin(), inputs_.end(),
+                                  [&](const std::unique_ptr<InputSource>& in) { return in->id() == inputId; }),
+                  inputs_.end());
+    pw_thread_loop_unlock(loop_);
+}
+
+std::vector<InputInfo> AudioEngine::listInputs() const {
+    std::vector<InputInfo> result;
+    result.reserve(inputs_.size());
+    for (const auto& in : inputs_) {
+        result.push_back(InputInfo{in->id(), in->displayName()});
+    }
+    return result;
+}
+
+InputSource* AudioEngine::findInput(const std::string& inputId) const {
+    auto it = std::find_if(inputs_.begin(), inputs_.end(),
+                            [&](const std::unique_ptr<InputSource>& in) { return in->id() == inputId; });
+    return it == inputs_.end() ? nullptr : it->get();
+}
+
 std::string AudioEngine::addRoute(const std::string& deviceName, const std::string& displayName,
                                    double gainDb) {
     uint32_t targetId = PW_ID_ANY;
@@ -124,12 +125,17 @@ std::string AudioEngine::addRoute(const std::string& deviceName, const std::stri
     pw_thread_loop_lock(loop_);
     auto route = std::make_unique<OutputRoute>(core_, loop_, routeId, deviceName, label, targetId,
                                                 kNumChannels, kSampleRateHz);
+    pw_thread_loop_unlock(loop_);
+
+    // New outputs hear everything by default (matches pre-mixer behavior).
+    for (const auto& in : inputs_) {
+        route->setInputGainDb(in->id(), in->ringBuffer(), 0.0);
+    }
     if (gainDb != 0.0) {
         route->setGainDb(gainDb);
     }
-    routes_.push_back(std::move(route));
-    pw_thread_loop_unlock(loop_);
 
+    routes_.push_back(std::move(route));
     return routeId;
 }
 
@@ -143,78 +149,77 @@ void AudioEngine::removeRoute(const std::string& routeId) {
 
 std::vector<RouteInfo> AudioEngine::listRoutes() const {
     std::vector<RouteInfo> result;
-    pw_thread_loop_lock(loop_);
     result.reserve(routes_.size());
     for (const auto& route : routes_) {
         result.push_back(route->info());
     }
-    pw_thread_loop_unlock(loop_);
     return result;
 }
 
-OutputRoute* AudioEngine::findRoute(const std::string& routeId) {
+OutputRoute* AudioEngine::findRoute(const std::string& routeId) const {
     auto it = std::find_if(routes_.begin(), routes_.end(),
                             [&](const std::unique_ptr<OutputRoute>& r) { return r->id() == routeId; });
     return it == routes_.end() ? nullptr : it->get();
 }
 
 bool AudioEngine::setRouteGain(const std::string& routeId, double gainDb) {
-    pw_thread_loop_lock(loop_);
     OutputRoute* route = findRoute(routeId);
     if (route) {
         route->setGainDb(gainDb);
     }
-    pw_thread_loop_unlock(loop_);
     return route != nullptr;
 }
 
 bool AudioEngine::setRouteMuted(const std::string& routeId, bool muted) {
-    pw_thread_loop_lock(loop_);
     OutputRoute* route = findRoute(routeId);
     if (route) {
         route->setMuted(muted);
     }
-    pw_thread_loop_unlock(loop_);
     return route != nullptr;
 }
 
 bool AudioEngine::setRouteBandCount(const std::string& routeId, std::size_t count) {
-    pw_thread_loop_lock(loop_);
     OutputRoute* route = findRoute(routeId);
     if (route) {
         route->setBandCount(count);
     }
-    pw_thread_loop_unlock(loop_);
     return route != nullptr;
 }
 
 bool AudioEngine::setRouteBand(const std::string& routeId, std::size_t index, const eqcore::EqBand& band) {
-    pw_thread_loop_lock(loop_);
     OutputRoute* route = findRoute(routeId);
     if (route) {
         route->setBand(index, band);
     }
-    pw_thread_loop_unlock(loop_);
     return route != nullptr;
 }
 
 std::vector<eqcore::EqBand> AudioEngine::getRouteBands(const std::string& routeId) const {
-    std::vector<eqcore::EqBand> result;
-    pw_thread_loop_lock(loop_);
-    for (const auto& route : routes_) {
-        if (route->id() == routeId) {
-            result = route->bands();
-            break;
-        }
-    }
-    pw_thread_loop_unlock(loop_);
-    return result;
+    OutputRoute* route = findRoute(routeId);
+    return route ? route->bands() : std::vector<eqcore::EqBand>{};
 }
 
-void AudioEngine::distributeToRoutes(const float* interleaved, std::size_t frames) {
-    for (auto& route : routes_) {
-        route->pushCaptured(interleaved, frames);
+bool AudioEngine::setRouteInputGain(const std::string& routeId, const std::string& inputId, double gainDb) {
+    OutputRoute* route = findRoute(routeId);
+    InputSource* input = findInput(inputId);
+    if (!route || !input) {
+        return false;
     }
+    return route->setInputGainDb(inputId, input->ringBuffer(), gainDb);
+}
+
+bool AudioEngine::removeRouteInput(const std::string& routeId, const std::string& inputId) {
+    OutputRoute* route = findRoute(routeId);
+    if (!route) {
+        return false;
+    }
+    route->removeInputSlot(inputId);
+    return true;
+}
+
+std::vector<std::pair<std::string, double>> AudioEngine::getRouteInputGains(const std::string& routeId) const {
+    OutputRoute* route = findRoute(routeId);
+    return route ? route->inputGainsDb() : std::vector<std::pair<std::string, double>>{};
 }
 
 void AudioEngine::onRegistryGlobal(void* userdata, uint32_t id, uint32_t /*permissions*/, const char* type,
@@ -234,9 +239,10 @@ void AudioEngine::onRegistryGlobal(void* userdata, uint32_t id, uint32_t /*permi
         return;
     }
 
-    // Skip nodes this daemon itself created.
+    // Skip nodes this daemon itself created (its own input virtual sinks
+    // and output routes), so they never show up as candidate route targets.
     const std::string_view nodeNameView(nodeName);
-    if (nodeNameView == "pipeeq_sink" || nodeNameView.starts_with("pipeeq_route")) {
+    if (nodeNameView.starts_with("pipeeq_input_") || nodeNameView.starts_with("pipeeq_route_")) {
         return;
     }
 
@@ -252,32 +258,6 @@ void AudioEngine::onRegistryGlobalRemove(void* userdata, uint32_t id) {
     self->devices_.erase(
         std::remove_if(self->devices_.begin(), self->devices_.end(), [id](const DeviceInfo& d) { return d.id == id; }),
         self->devices_.end());
-}
-
-void AudioEngine::onCaptureProcess(void* userdata) {
-    auto* self = static_cast<AudioEngine*>(userdata);
-
-    pw_buffer* b = pw_stream_dequeue_buffer(self->captureStream_);
-    if (!b) {
-        return;
-    }
-
-    spa_buffer* buf = b->buffer;
-    float* samples = static_cast<float*>(buf->datas[0].data);
-    if (samples && buf->datas[0].chunk) {
-        const uint32_t stride = static_cast<uint32_t>(sizeof(float)) * static_cast<uint32_t>(kNumChannels);
-        const uint32_t frames = buf->datas[0].chunk->size / stride;
-        self->distributeToRoutes(samples, frames);
-    }
-
-    pw_stream_queue_buffer(self->captureStream_, b);
-}
-
-void AudioEngine::onCaptureStateChanged(void* /*userdata*/, pw_stream_state /*old*/, pw_stream_state state,
-                                         const char* error) {
-    if (state == PW_STREAM_STATE_ERROR) {
-        std::fprintf(stderr, "pipeeq: capture stream error: %s\n", error ? error : "(unknown)");
-    }
 }
 
 } // namespace pipeeq

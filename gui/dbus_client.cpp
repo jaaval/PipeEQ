@@ -11,6 +11,8 @@ namespace {
 using DeviceStructRow = sdbus::Struct<uint32_t, std::string, std::string>;
 using RouteStructRow = sdbus::Struct<std::string, std::string, std::string, double, bool, uint32_t>;
 using BandStructRow = sdbus::Struct<std::string, double, double, double>;
+using InputStructRow = sdbus::Struct<std::string, std::string>;
+using InputGainStructRow = sdbus::Struct<std::string, double>;
 } // namespace
 
 DbusClient::DbusClient(QObject* parent) : QObject(parent) {
@@ -29,6 +31,10 @@ DbusClient::DbusClient(QObject* parent) : QObject(parent) {
     proxy_->uponSignal(eqcore::dbus::kSignalRouteChanged)
         .onInterface(eqcore::dbus::kInterfaceName)
         .call([this](const std::string& routeId) { emit routeChanged(QString::fromStdString(routeId)); });
+
+    proxy_->uponSignal(eqcore::dbus::kSignalInputsChanged)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .call([this] { emit inputsChanged(); });
 }
 
 DbusClient::~DbusClient() = default;
@@ -169,6 +175,88 @@ bool DbusClient::setRouteBand(const QString& routeId, uint32_t index, const QStr
         qWarning("pipeeq-gui: SetRouteBand failed: %s", e.what());
     }
     return ok;
+}
+
+std::vector<InputRow> DbusClient::listInputs() {
+    std::vector<InputRow> result;
+    try {
+        std::vector<InputStructRow> rows;
+        proxy_->callMethod(eqcore::dbus::kMethodListInputs)
+            .onInterface(eqcore::dbus::kInterfaceName)
+            .storeResultsTo(rows);
+        for (const auto& r : rows) {
+            result.push_back(InputRow{QString::fromStdString(std::get<0>(r)), QString::fromStdString(std::get<1>(r))});
+        }
+    } catch (const sdbus::Error& e) {
+        qWarning("pipeeq-gui: ListInputs failed: %s", e.what());
+    }
+    return result;
+}
+
+QString DbusClient::addInput(const QString& displayName) {
+    std::string inputId;
+    try {
+        proxy_->callMethod(eqcore::dbus::kMethodAddInput)
+            .onInterface(eqcore::dbus::kInterfaceName)
+            .withArguments(displayName.toStdString())
+            .storeResultsTo(inputId);
+    } catch (const sdbus::Error& e) {
+        qWarning("pipeeq-gui: AddInput failed: %s", e.what());
+    }
+    return QString::fromStdString(inputId);
+}
+
+void DbusClient::removeInput(const QString& inputId) {
+    try {
+        proxy_->callMethod(eqcore::dbus::kMethodRemoveInput)
+            .onInterface(eqcore::dbus::kInterfaceName)
+            .withArguments(inputId.toStdString());
+    } catch (const sdbus::Error& e) {
+        qWarning("pipeeq-gui: RemoveInput failed: %s", e.what());
+    }
+}
+
+bool DbusClient::setRouteInputGain(const QString& routeId, const QString& inputId, double gainDb) {
+    bool ok = false;
+    try {
+        proxy_->callMethod(eqcore::dbus::kMethodSetRouteInputGain)
+            .onInterface(eqcore::dbus::kInterfaceName)
+            .withArguments(routeId.toStdString(), inputId.toStdString(), gainDb)
+            .storeResultsTo(ok);
+    } catch (const sdbus::Error& e) {
+        qWarning("pipeeq-gui: SetRouteInputGain failed: %s", e.what());
+    }
+    return ok;
+}
+
+bool DbusClient::removeRouteInput(const QString& routeId, const QString& inputId) {
+    bool ok = false;
+    try {
+        proxy_->callMethod(eqcore::dbus::kMethodRemoveRouteInput)
+            .onInterface(eqcore::dbus::kInterfaceName)
+            .withArguments(routeId.toStdString(), inputId.toStdString())
+            .storeResultsTo(ok);
+    } catch (const sdbus::Error& e) {
+        qWarning("pipeeq-gui: RemoveRouteInput failed: %s", e.what());
+    }
+    return ok;
+}
+
+std::vector<std::pair<QString, double>> DbusClient::getRouteInputGains(const QString& routeId) {
+    std::vector<std::pair<QString, double>> result;
+    try {
+        std::vector<InputGainStructRow> rows;
+        proxy_->callMethod(eqcore::dbus::kMethodGetRouteInputGains)
+            .onInterface(eqcore::dbus::kInterfaceName)
+            .withArguments(routeId.toStdString())
+            .storeResultsTo(rows);
+        for (const auto& r : rows) {
+            result.emplace_back(QString::fromStdString(std::get<0>(r)), std::get<1>(r));
+        }
+    } catch (const sdbus::Error& e) {
+        qWarning("pipeeq-gui: GetRouteInputGains failed: %s", e.what());
+    }
+    return result;
 }
 
 } // namespace pipeeq

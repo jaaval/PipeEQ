@@ -20,9 +20,17 @@ inline constexpr const char* kMethodSetRouteBand = "SetRouteBand";
 inline constexpr const char* kMethodSetRouteBandCount = "SetRouteBandCount";
 inline constexpr const char* kMethodGetState = "GetState";
 inline constexpr const char* kMethodGetRouteBands = "GetRouteBands";
+inline constexpr const char* kMethodListInputs = "ListInputs";
+inline constexpr const char* kMethodAddInput = "AddInput";
+inline constexpr const char* kMethodRemoveInput = "RemoveInput";
+inline constexpr const char* kMethodSetRouteInputGain = "SetRouteInputGain";
+inline constexpr const char* kMethodRemoveRouteInput = "RemoveRouteInput";
+inline constexpr const char* kMethodGetRouteInputGains = "GetRouteInputGains";
+inline constexpr const char* kMethodGetMixMatrix = "GetMixMatrix";
 
 // Signals
 inline constexpr const char* kSignalDevicesChanged = "DevicesChanged";
 inline constexpr const char* kSignalRouteChanged = "RouteChanged";
+inline constexpr const char* kSignalInputsChanged = "InputsChanged";
 
 } // namespace eqcore::dbus

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include <QObject>
@@ -28,6 +29,11 @@ struct RouteRow {
     uint32_t bandCount = 0;
 };
 
+struct InputRow {
+    QString id;
+    QString displayName;
+};
+
 // Thin wrapper around an sdbus-c++ proxy to org.pipeeq.Daemon1. Method calls
 // are synchronous (fine for a control GUI - they're infrequent and local).
 // Signals received on the proxy's own background thread are re-emitted as Qt
@@ -51,8 +57,18 @@ public:
     bool setRouteBand(const QString& routeId, uint32_t index, const QString& type, double freqHz,
                        double gainDb, double q);
 
+    std::vector<InputRow> listInputs();
+    QString addInput(const QString& displayName);
+    void removeInput(const QString& inputId);
+    bool setRouteInputGain(const QString& routeId, const QString& inputId, double gainDb);
+    bool removeRouteInput(const QString& routeId, const QString& inputId);
+    // Only entries for currently-active (subscribed) inputs are returned;
+    // an input this route doesn't hear at all simply won't appear here.
+    std::vector<std::pair<QString, double>> getRouteInputGains(const QString& routeId);
+
 signals:
     void routeChanged(const QString& routeId);
+    void inputsChanged();
 
 private:
     std::unique_ptr<sdbus::IProxy> proxy_;

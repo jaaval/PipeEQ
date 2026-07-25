@@ -1,6 +1,7 @@
 #include "dbus_service.h"
 
 #include <cstdio>
+#include <map>
 
 #include "dbus_interface.h"
 #include "route_config.h"
@@ -27,6 +28,27 @@ DbusService::~DbusService() {
 
 void DbusService::start() {
     eqcore::AppConfig config = eqcore::loadConfig();
+
+    // Migration: configs saved before the mixer feature have no inputs at
+    // all - synthesize one default so upgrading is a no-op for existing
+    // single-input users (every saved route implicitly heard "the" input).
+    if (config.inputs.empty()) {
+        eqcore::InputConfig defaultInput;
+        defaultInput.id = "input-1";
+        defaultInput.displayName = "Default";
+        config.inputs.push_back(defaultInput);
+        for (auto& routeConfig : config.routes) {
+            routeConfig.inputGainsDb[defaultInput.id] = 0.0;
+        }
+    }
+
+    // Inputs must exist before routes, since AudioEngine::addRoute() seeds
+    // every currently-known input onto the new route.
+    std::map<std::string, std::string> inputIdTranslation; // saved id -> freshly (re)assigned id
+    for (const auto& inputConfig : config.inputs) {
+        inputIdTranslation[inputConfig.id] = engine_.addInput(inputConfig.displayName);
+    }
+
     for (const auto& routeConfig : config.routes) {
         const std::string routeId = engine_.addRoute(routeConfig.deviceName, routeConfig.displayName,
                                                        routeConfig.gainDb);
@@ -41,6 +63,26 @@ void DbusService::start() {
         engine_.setRouteBandCount(routeId, routeConfig.bands.size());
         for (std::size_t i = 0; i < routeConfig.bands.size(); ++i) {
             engine_.setRouteBand(routeId, i, routeConfig.bands[i]);
+        }
+
+        // addRoute() already auto-seeded every current input at 0dB (new
+        // outputs hear everything by default); reconcile that against what
+        // was actually saved - an explicit gain, or explicitly off if the
+        // saved config doesn't mention this input at all.
+        std::map<std::string, double> translatedGains;
+        for (const auto& [savedInputId, gainDb] : routeConfig.inputGainsDb) {
+            auto it = inputIdTranslation.find(savedInputId);
+            if (it != inputIdTranslation.end()) {
+                translatedGains[it->second] = gainDb;
+            }
+        }
+        for (const auto& in : engine_.listInputs()) {
+            auto it = translatedGains.find(in.id);
+            if (it != translatedGains.end()) {
+                engine_.setRouteInputGain(routeId, in.id, it->second);
+            } else {
+                engine_.removeRouteInput(routeId, in.id);
+            }
         }
     }
 
@@ -73,7 +115,25 @@ void DbusService::start() {
                                        double gainDb, double q) {
                     return setRouteBand(routeId, index, type, freqHz, gainDb, q);
                 }),
+            sdbus::registerMethod(eqcore::dbus::kMethodListInputs).implementedAs([this] { return listInputs(); }),
+            sdbus::registerMethod(eqcore::dbus::kMethodAddInput)
+                .implementedAs([this](std::string displayName) { return addInput(displayName); }),
+            sdbus::registerMethod(eqcore::dbus::kMethodRemoveInput)
+                .implementedAs([this](std::string inputId) { removeInput(inputId); }),
+            sdbus::registerMethod(eqcore::dbus::kMethodSetRouteInputGain)
+                .implementedAs([this](std::string routeId, std::string inputId, double gainDb) {
+                    return setRouteInputGain(routeId, inputId, gainDb);
+                }),
+            sdbus::registerMethod(eqcore::dbus::kMethodRemoveRouteInput)
+                .implementedAs([this](std::string routeId, std::string inputId) {
+                    return removeRouteInput(routeId, inputId);
+                }),
+            sdbus::registerMethod(eqcore::dbus::kMethodGetRouteInputGains)
+                .implementedAs([this](std::string routeId) { return getRouteInputGains(routeId); }),
+            sdbus::registerMethod(eqcore::dbus::kMethodGetMixMatrix)
+                .implementedAs([this] { return getMixMatrix(); }),
             sdbus::registerSignal(eqcore::dbus::kSignalDevicesChanged),
+            sdbus::registerSignal(eqcore::dbus::kSignalInputsChanged),
             sdbus::registerSignal(eqcore::dbus::kSignalRouteChanged).withParameters<std::string>())
         .forInterface(sdbus::InterfaceName{eqcore::dbus::kInterfaceName});
 #else
@@ -118,7 +178,32 @@ void DbusService::start() {
                                double gainDb, double q) {
             return setRouteBand(routeId, index, type, freqHz, gainDb, q);
         });
+    object_->registerMethod(eqcore::dbus::kMethodListInputs)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs([this] { return listInputs(); });
+    object_->registerMethod(eqcore::dbus::kMethodAddInput)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs([this](std::string displayName) { return addInput(displayName); });
+    object_->registerMethod(eqcore::dbus::kMethodRemoveInput)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs([this](std::string inputId) { removeInput(inputId); });
+    object_->registerMethod(eqcore::dbus::kMethodSetRouteInputGain)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs([this](std::string routeId, std::string inputId, double gainDb) {
+            return setRouteInputGain(routeId, inputId, gainDb);
+        });
+    object_->registerMethod(eqcore::dbus::kMethodRemoveRouteInput)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs(
+            [this](std::string routeId, std::string inputId) { return removeRouteInput(routeId, inputId); });
+    object_->registerMethod(eqcore::dbus::kMethodGetRouteInputGains)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs([this](std::string routeId) { return getRouteInputGains(routeId); });
+    object_->registerMethod(eqcore::dbus::kMethodGetMixMatrix)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .implementedAs([this] { return getMixMatrix(); });
     object_->registerSignal(eqcore::dbus::kSignalDevicesChanged).onInterface(eqcore::dbus::kInterfaceName);
+    object_->registerSignal(eqcore::dbus::kSignalInputsChanged).onInterface(eqcore::dbus::kInterfaceName);
     object_->registerSignal(eqcore::dbus::kSignalRouteChanged)
         .onInterface(eqcore::dbus::kInterfaceName)
         .withParameters<std::string>();
@@ -164,8 +249,34 @@ std::vector<DbusService::BandRow> DbusService::getRouteBands(const std::string& 
     return rows;
 }
 
+std::vector<DbusService::InputRow> DbusService::listInputs() {
+    std::vector<InputRow> rows;
+    for (const auto& in : engine_.listInputs()) {
+        rows.push_back(InputRow{in.id, in.displayName});
+    }
+    return rows;
+}
+
+std::vector<DbusService::InputGainRow> DbusService::getRouteInputGains(const std::string& routeId) {
+    std::vector<InputGainRow> rows;
+    for (const auto& [inputId, gainDb] : engine_.getRouteInputGains(routeId)) {
+        rows.push_back(InputGainRow{inputId, gainDb});
+    }
+    return rows;
+}
+
+std::vector<DbusService::MixMatrixRow> DbusService::getMixMatrix() {
+    std::vector<MixMatrixRow> rows;
+    for (const auto& route : engine_.listRoutes()) {
+        for (const auto& [inputId, gainDb] : engine_.getRouteInputGains(route.id)) {
+            rows.push_back(MixMatrixRow{route.id, inputId, gainDb});
+        }
+    }
+    return rows;
+}
+
 DbusService::StateRow DbusService::getState() {
-    return StateRow{listDevices(), listRoutes()};
+    return StateRow{listDevices(), listRoutes(), listInputs()};
 }
 
 std::string DbusService::addRoute(const std::string& deviceName, const std::string& displayName) {
@@ -226,14 +337,54 @@ bool DbusService::setRouteBand(const std::string& routeId, uint32_t index, const
     return ok;
 }
 
+std::string DbusService::addInput(const std::string& displayName) {
+    const std::string inputId = engine_.addInput(displayName);
+    persistConfig();
+    emitInputsChanged();
+    return inputId;
+}
+
+void DbusService::removeInput(const std::string& inputId) {
+    engine_.removeInput(inputId);
+    persistConfig();
+    emitInputsChanged();
+}
+
+bool DbusService::setRouteInputGain(const std::string& routeId, const std::string& inputId, double gainDb) {
+    const bool ok = engine_.setRouteInputGain(routeId, inputId, gainDb);
+    if (ok) {
+        persistConfig();
+        emitRouteChanged(routeId);
+    }
+    return ok;
+}
+
+bool DbusService::removeRouteInput(const std::string& routeId, const std::string& inputId) {
+    const bool ok = engine_.removeRouteInput(routeId, inputId);
+    if (ok) {
+        persistConfig();
+        emitRouteChanged(routeId);
+    }
+    return ok;
+}
+
 void DbusService::emitRouteChanged(const std::string& routeId) {
     object_->emitSignal(eqcore::dbus::kSignalRouteChanged)
         .onInterface(eqcore::dbus::kInterfaceName)
         .withArguments(routeId);
 }
 
+void DbusService::emitInputsChanged() {
+    object_->emitSignal(eqcore::dbus::kSignalInputsChanged).onInterface(eqcore::dbus::kInterfaceName);
+}
+
 void DbusService::persistConfig() {
     eqcore::AppConfig config;
+
+    for (const auto& info : engine_.listInputs()) {
+        config.inputs.push_back(eqcore::InputConfig{info.id, info.displayName});
+    }
+
     for (const auto& info : engine_.listRoutes()) {
         eqcore::RouteConfig routeConfig;
         routeConfig.id = info.id;
@@ -242,8 +393,12 @@ void DbusService::persistConfig() {
         routeConfig.gainDb = info.gainDb;
         routeConfig.muted = info.muted;
         routeConfig.bands = engine_.getRouteBands(info.id);
+        for (const auto& [inputId, gainDb] : engine_.getRouteInputGains(info.id)) {
+            routeConfig.inputGainsDb[inputId] = gainDb;
+        }
         config.routes.push_back(std::move(routeConfig));
     }
+
     eqcore::saveConfig(config);
 }
 

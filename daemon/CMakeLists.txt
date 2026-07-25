@@ -2,6 +2,7 @@ add_executable(pipeeq-daemon
     main.cpp
     audio_engine.cpp
     output_route.cpp
+    input_source.cpp
     dbus_service.cpp
 )
 

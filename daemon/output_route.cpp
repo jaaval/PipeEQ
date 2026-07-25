@@ -15,22 +15,32 @@ InterleavedRingBuffer::InterleavedRingBuffer(std::size_t capacityFrames, int num
       buffer_(capacityFrames * static_cast<std::size_t>(numChannels), 0.0f) {}
 
 void InterleavedRingBuffer::write(const float* interleaved, std::size_t frames) {
+    std::size_t pos = writePos_;
     for (std::size_t i = 0; i < frames; ++i) {
-        const std::size_t slot = (writePos_ + i) % capacityFrames_;
+        const std::size_t slot = (pos + i) % capacityFrames_;
         for (int ch = 0; ch < numChannels_; ++ch) {
             buffer_[slot * numChannels_ + ch] = interleaved[i * numChannels_ + ch];
         }
     }
-    writePos_ = (writePos_ + frames) % capacityFrames_;
-    available_ = std::min(available_ + frames, capacityFrames_);
+    pos += frames;
+    writePos_ = pos;
+    writeIndex_.store(pos, std::memory_order_release);
 }
 
-void InterleavedRingBuffer::read(float* outInterleaved, std::size_t frames) {
-    const std::size_t toRead = std::min(frames, available_);
-    const std::size_t readPos = (writePos_ + capacityFrames_ - available_) % capacityFrames_;
+void InterleavedRingBuffer::readAt(std::size_t& cursor, float* outInterleaved, std::size_t frames) const {
+    const std::size_t writtenTotal = writeIndex_.load(std::memory_order_acquire);
+
+    // If this reader has fallen behind by more than the buffer holds, jump
+    // forward to the oldest frame the writer hasn't already overwritten.
+    if (writtenTotal > cursor + capacityFrames_) {
+        cursor = writtenTotal - capacityFrames_;
+    }
+
+    const std::size_t availableFrames = (writtenTotal > cursor) ? (writtenTotal - cursor) : 0;
+    const std::size_t toRead = std::min(frames, availableFrames);
 
     for (std::size_t i = 0; i < toRead; ++i) {
-        const std::size_t slot = (readPos + i) % capacityFrames_;
+        const std::size_t slot = (cursor + i) % capacityFrames_;
         for (int ch = 0; ch < numChannels_; ++ch) {
             outInterleaved[i * numChannels_ + ch] = buffer_[slot * numChannels_ + ch];
         }
@@ -40,7 +50,8 @@ void InterleavedRingBuffer::read(float* outInterleaved, std::size_t frames) {
             outInterleaved[i * numChannels_ + ch] = 0.0f;
         }
     }
-    available_ -= toRead;
+
+    cursor += toRead;
 }
 
 namespace {
@@ -60,8 +71,11 @@ OutputRoute::OutputRoute(pw_core* core, pw_thread_loop* /*loop*/, std::string id
       deviceName_(std::move(deviceName)),
       displayName_(std::move(displayName)),
       numChannels_(numChannels),
-      ring_(sampleRateHz / 2, numChannels),
-      chain_(numChannels, static_cast<double>(sampleRateHz)) {
+      sampleRateHz_(sampleRateHz),
+      bandState_(static_cast<std::size_t>(numChannels)),
+      mixScratch_(kScratchCapacityFrames * static_cast<std::size_t>(numChannels), 0.0f) {
+    snapshot_.store(std::make_shared<const RouteSnapshot>());
+
     const std::string nodeName = "pipeeq_route_" + id_;
 
     pw_properties* props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Playback",
@@ -97,36 +111,101 @@ OutputRoute::~OutputRoute() {
 
 void OutputRoute::setGainDb(double gainDb) {
     gainDb_ = gainDb;
-    gainLinear_.store(static_cast<float>(std::pow(10.0, gainDb / 20.0)), std::memory_order_relaxed);
+    rebuildSnapshot();
 }
 
 void OutputRoute::setMuted(bool muted) {
     muted_ = muted;
+    rebuildSnapshot();
 }
 
 void OutputRoute::setBandCount(std::size_t count) {
-    chain_.setBandCount(count);
+    count = std::min(count, kMaxBands);
+    bands_.resize(count);
+    rebuildSnapshot();
 }
 
 void OutputRoute::setBand(std::size_t index, const eqcore::EqBand& band) {
-    chain_.setBand(index, band);
+    bands_.at(index) = band;
+    rebuildSnapshot();
 }
 
 std::vector<eqcore::EqBand> OutputRoute::bands() const {
-    std::vector<eqcore::EqBand> result;
-    result.reserve(chain_.bandCount());
-    for (std::size_t i = 0; i < chain_.bandCount(); ++i) {
-        result.push_back(chain_.band(i));
+    return bands_;
+}
+
+int OutputRoute::findSlot(const std::string& inputId) const {
+    for (std::size_t i = 0; i < inputSlotsMirror_.size(); ++i) {
+        if (inputSlotsMirror_[i].active && inputSlotsMirror_[i].inputId == inputId) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+bool OutputRoute::setInputGainDb(const std::string& inputId, std::shared_ptr<const InterleavedRingBuffer> buffer,
+                                  double gainDb) {
+    int slot = findSlot(inputId);
+    if (slot < 0) {
+        for (std::size_t i = 0; i < inputSlotsMirror_.size(); ++i) {
+            if (!inputSlotsMirror_[i].active) {
+                slot = static_cast<int>(i);
+                inputSlotsMirror_[i].active = true;
+                inputSlotsMirror_[i].inputId = inputId;
+                inputSlotsMirror_[i].buffer = buffer;
+                // Start "live" (no backlog) rather than replaying history
+                // or immediately triggering the overrun-jump path.
+                readCursors_[i] = buffer ? buffer->currentWriteIndex() : 0;
+                break;
+            }
+        }
+        if (slot < 0) {
+            return false;
+        }
+    }
+
+    inputSlotsMirror_[static_cast<std::size_t>(slot)].gainLinear =
+        static_cast<float>(std::pow(10.0, gainDb / 20.0));
+    rebuildSnapshot();
+    return true;
+}
+
+void OutputRoute::removeInputSlot(const std::string& inputId) {
+    const int slot = findSlot(inputId);
+    if (slot < 0) {
+        return;
+    }
+    inputSlotsMirror_[static_cast<std::size_t>(slot)] = InputMixSlot{};
+    rebuildSnapshot();
+}
+
+std::vector<std::pair<std::string, double>> OutputRoute::inputGainsDb() const {
+    std::vector<std::pair<std::string, double>> result;
+    for (const auto& slot : inputSlotsMirror_) {
+        if (slot.active) {
+            result.emplace_back(slot.inputId, 20.0 * std::log10(static_cast<double>(slot.gainLinear)));
+        }
     }
     return result;
 }
 
 RouteInfo OutputRoute::info() const {
-    return RouteInfo{id_, deviceName_, displayName_, gainDb_, muted_, chain_.bandCount()};
+    return RouteInfo{id_, deviceName_, displayName_, gainDb_, muted_, bands_.size()};
 }
 
-void OutputRoute::pushCaptured(const float* interleaved, std::size_t frames) {
-    ring_.write(interleaved, frames);
+void OutputRoute::rebuildSnapshot() {
+    auto next = std::make_shared<RouteSnapshot>();
+
+    next->coeffs.reserve(bands_.size());
+    for (const auto& band : bands_) {
+        next->coeffs.push_back(band.toCoeffs(static_cast<double>(sampleRateHz_)));
+    }
+
+    next->masterGainLinear = static_cast<float>(std::pow(10.0, gainDb_ / 20.0));
+    next->muted = muted_;
+    next->inputs = inputSlotsMirror_;
+
+    snapshot_.store(std::move(next), std::memory_order_release);
 }
 
 void OutputRoute::onProcess(void* userdata) {
@@ -144,20 +223,45 @@ void OutputRoute::onProcess(void* userdata) {
         return;
     }
 
-    const uint32_t stride = static_cast<uint32_t>(sizeof(float)) * static_cast<uint32_t>(self->numChannels_);
+    const int numChannels = self->numChannels_;
+    const uint32_t stride = static_cast<uint32_t>(sizeof(float)) * static_cast<uint32_t>(numChannels);
     uint32_t frames = buf->datas[0].maxsize / stride;
     if (b->requested != 0 && b->requested < frames) {
         frames = static_cast<uint32_t>(b->requested);
     }
+    frames = std::min(frames, static_cast<uint32_t>(OutputRoute::kScratchCapacityFrames));
 
-    self->ring_.read(dst, frames);
+    const std::shared_ptr<const RouteSnapshot> snap = self->snapshot_.load(std::memory_order_acquire);
+    const uint32_t sampleCount = frames * static_cast<uint32_t>(numChannels);
 
-    const float gain = self->muted_ ? 0.0f : self->gainLinear_.load(std::memory_order_relaxed);
-    const int numChannels = self->numChannels_;
+    std::fill(dst, dst + sampleCount, 0.0f);
+
+    for (std::size_t i = 0; i < snap->inputs.size(); ++i) {
+        const InputMixSlot& slot = snap->inputs[i];
+        if (!slot.active || !slot.buffer || slot.gainLinear == 0.0f) {
+            continue;
+        }
+        slot.buffer->readAt(self->readCursors_[i], self->mixScratch_.data(), frames);
+        const float gain = slot.gainLinear;
+        for (uint32_t s = 0; s < sampleCount; ++s) {
+            dst[s] += self->mixScratch_[s] * gain;
+        }
+    }
+
+    // Safety clamp against multi-input summing overrun.
+    for (uint32_t s = 0; s < sampleCount; ++s) {
+        dst[s] = std::clamp(dst[s], -1.0f, 1.0f);
+    }
+
+    const float masterGain = snap->muted ? 0.0f : snap->masterGainLinear;
     for (uint32_t i = 0; i < frames; ++i) {
         for (int ch = 0; ch < numChannels; ++ch) {
-            float& sample = dst[i * numChannels + ch];
-            sample = self->chain_.processSample(ch, sample) * gain;
+            float sample = dst[i * numChannels + ch];
+            auto& channelState = self->bandState_[static_cast<std::size_t>(ch)];
+            for (std::size_t band = 0; band < snap->coeffs.size(); ++band) {
+                sample = channelState[band].process(snap->coeffs[band], sample);
+            }
+            dst[i * numChannels + ch] = sample * masterGain;
         }
     }
 

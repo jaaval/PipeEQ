@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -20,7 +21,18 @@ NLOHMANN_JSON_SERIALIZE_ENUM(FilterType, {
 void to_json(nlohmann::json& j, const EqBand& b);
 void from_json(const nlohmann::json& j, EqBand& b);
 
-// A single output route: one physical device with its own gain/mute/EQ.
+// One audio input (today always a virtual sink apps can be assigned to).
+struct InputConfig {
+    std::string id;          // stable id (e.g. "input-1"), assigned by the daemon
+    std::string displayName; // user-facing label
+};
+
+void to_json(nlohmann::json& j, const InputConfig& i);
+void from_json(const nlohmann::json& j, InputConfig& i);
+
+// A single output route: one physical device with its own gain/mute/EQ,
+// plus its mix level for each input it hears (input id -> gain in dB;
+// inputs not present here are silent on this route).
 struct RouteConfig {
     std::string id;          // stable route id (e.g. "route-1"), assigned by the daemon
     std::string deviceName;  // PipeWire node.name of the target physical sink
@@ -28,12 +40,14 @@ struct RouteConfig {
     double gainDb = 0.0;
     bool muted = false;
     std::vector<EqBand> bands;
+    std::map<std::string, double> inputGainsDb;
 };
 
 void to_json(nlohmann::json& j, const RouteConfig& r);
 void from_json(const nlohmann::json& j, RouteConfig& r);
 
 struct AppConfig {
+    std::vector<InputConfig> inputs;
     std::vector<RouteConfig> routes;
 };
 
