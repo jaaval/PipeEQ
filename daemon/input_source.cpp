@@ -5,6 +5,8 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/pod/builder.h>
 
+#include "audio_format.h"
+
 namespace pipeeq {
 
 namespace {
@@ -39,6 +41,9 @@ InputSource::InputSource(pw_core* core, std::string id, std::string displayName,
     info.format = SPA_AUDIO_FORMAT_F32;
     info.channels = static_cast<uint32_t>(numChannels);
     info.rate = sampleRateHz;
+    // Makes this advertise a real stereo pair, so applications and volume
+    // controls see front-left/front-right instead of aux0/aux1.
+    fillChannelPositions(info, numChannels);
 
     const spa_pod* params[1];
     params[0] = spa_format_audio_raw_build(&podBuilder, SPA_PARAM_EnumFormat, &info);

@@ -8,8 +8,10 @@
 namespace pipeeq {
 
 namespace {
-using DeviceStructRow = sdbus::Struct<uint32_t, std::string, std::string>;
-using RouteStructRow = sdbus::Struct<std::string, std::string, std::string, double, bool, uint32_t>;
+using DeviceStructRow =
+    sdbus::Struct<uint32_t, std::string, std::string, std::string, std::string, std::string>;
+using RouteStructRow = sdbus::Struct<std::string, std::string, std::string, double, bool, uint32_t, bool, bool,
+                                      std::string, std::string>;
 using BandStructRow = sdbus::Struct<std::string, double, double, double>;
 using InputStructRow = sdbus::Struct<std::string, std::string>;
 using InputGainStructRow = sdbus::Struct<std::string, double>;
@@ -48,7 +50,10 @@ std::vector<DeviceRow> DbusClient::listDevices() {
             .storeResultsTo(rows);
         for (const auto& r : rows) {
             result.push_back(DeviceRow{std::get<0>(r), QString::fromStdString(std::get<1>(r)),
-                                        QString::fromStdString(std::get<2>(r))});
+                                        QString::fromStdString(std::get<2>(r)),
+                                        QString::fromStdString(std::get<3>(r)),
+                                        QString::fromStdString(std::get<4>(r)),
+                                        QString::fromStdString(std::get<5>(r))});
         }
     } catch (const sdbus::Error& e) {
         qWarning("pipeeq-gui: ListDevices failed: %s", e.what());
@@ -71,6 +76,10 @@ std::vector<RouteRow> DbusClient::listRoutes() {
             row.gainDb = std::get<3>(r);
             row.muted = std::get<4>(r);
             row.bandCount = std::get<5>(r);
+            row.connected = std::get<6>(r);
+            row.autoConnect = std::get<7>(r);
+            row.leftChannel = QString::fromStdString(std::get<8>(r));
+            row.rightChannel = QString::fromStdString(std::get<9>(r));
             result.push_back(std::move(row));
         }
     } catch (const sdbus::Error& e) {
@@ -101,12 +110,14 @@ std::vector<eqcore::EqBand> DbusClient::getRouteBands(const QString& routeId) {
     return result;
 }
 
-QString DbusClient::addRoute(const QString& deviceName, const QString& displayName) {
+QString DbusClient::addRoute(const QString& deviceName, const QString& displayName,
+                              const QString& leftChannel, const QString& rightChannel) {
     std::string routeId;
     try {
         proxy_->callMethod(eqcore::dbus::kMethodAddRoute)
             .onInterface(eqcore::dbus::kInterfaceName)
-            .withArguments(deviceName.toStdString(), displayName.toStdString())
+            .withArguments(deviceName.toStdString(), displayName.toStdString(), leftChannel.toStdString(),
+                            rightChannel.toStdString())
             .storeResultsTo(routeId);
     } catch (const sdbus::Error& e) {
         qWarning("pipeeq-gui: AddRoute failed: %s", e.what());
@@ -173,6 +184,33 @@ bool DbusClient::setRouteBand(const QString& routeId, uint32_t index, const QStr
             .storeResultsTo(ok);
     } catch (const sdbus::Error& e) {
         qWarning("pipeeq-gui: SetRouteBand failed: %s", e.what());
+    }
+    return ok;
+}
+
+bool DbusClient::setRouteAutoConnect(const QString& routeId, bool autoConnect) {
+    bool ok = false;
+    try {
+        proxy_->callMethod(eqcore::dbus::kMethodSetRouteAutoConnect)
+            .onInterface(eqcore::dbus::kInterfaceName)
+            .withArguments(routeId.toStdString(), autoConnect)
+            .storeResultsTo(ok);
+    } catch (const sdbus::Error& e) {
+        qWarning("pipeeq-gui: SetRouteAutoConnect failed: %s", e.what());
+    }
+    return ok;
+}
+
+bool DbusClient::setRouteChannels(const QString& routeId, const QString& leftChannel,
+                                   const QString& rightChannel) {
+    bool ok = false;
+    try {
+        proxy_->callMethod(eqcore::dbus::kMethodSetRouteChannels)
+            .onInterface(eqcore::dbus::kInterfaceName)
+            .withArguments(routeId.toStdString(), leftChannel.toStdString(), rightChannel.toStdString())
+            .storeResultsTo(ok);
+    } catch (const sdbus::Error& e) {
+        qWarning("pipeeq-gui: SetRouteChannels failed: %s", e.what());
     }
     return ok;
 }

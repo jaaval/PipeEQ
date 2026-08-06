@@ -14,10 +14,16 @@
 
 namespace pipeeq {
 
+// One selectable stereo pair of one device. A 4-channel interface yields two
+// of these for the same nodeName, so its output pairs can be driven as
+// separate PipeEQ outputs with independent EQ.
 struct DeviceRow {
     uint32_t id = 0;
     QString nodeName;
     QString description;
+    QString pairLabel;    // e.g. "Rear L/R (ch 3-4)"
+    QString leftChannel;  // SPA short name, empty = device default
+    QString rightChannel;
 };
 
 struct RouteRow {
@@ -27,6 +33,13 @@ struct RouteRow {
     double gainDb = 0.0;
     bool muted = false;
     uint32_t bandCount = 0;
+    // False while the output's device isn't present. Such a route is still
+    // fully editable - the daemon keeps the settings and applies them when
+    // the device turns up.
+    bool connected = false;
+    bool autoConnect = true;
+    QString leftChannel;
+    QString rightChannel;
 };
 
 struct InputRow {
@@ -49,13 +62,16 @@ public:
     std::vector<DeviceRow> listDevices();
     std::vector<RouteRow> listRoutes();
     std::vector<eqcore::EqBand> getRouteBands(const QString& routeId);
-    QString addRoute(const QString& deviceName, const QString& displayName);
+    QString addRoute(const QString& deviceName, const QString& displayName, const QString& leftChannel,
+                      const QString& rightChannel);
     void removeRoute(const QString& routeId);
     bool setRouteGain(const QString& routeId, double gainDb);
     bool setRouteMute(const QString& routeId, bool muted);
     bool setRouteBandCount(const QString& routeId, uint32_t count);
     bool setRouteBand(const QString& routeId, uint32_t index, const QString& type, double freqHz,
                        double gainDb, double q);
+    bool setRouteAutoConnect(const QString& routeId, bool autoConnect);
+    bool setRouteChannels(const QString& routeId, const QString& leftChannel, const QString& rightChannel);
 
     std::vector<InputRow> listInputs();
     QString addInput(const QString& displayName);

@@ -44,6 +44,8 @@ void to_json(nlohmann::json& j, const RouteConfig& r) {
         {"muted", r.muted},
         {"bands", r.bands},
         {"input_gains_db", r.inputGainsDb},
+        {"auto_connect", r.autoConnect},
+        {"channels", nlohmann::json::array({r.leftChannel, r.rightChannel})},
     };
 }
 
@@ -57,6 +59,16 @@ void from_json(const nlohmann::json& j, RouteConfig& r) {
     // Added after the initial release - absent in configs saved before the
     // mixer feature existed, so read it leniently rather than with at().
     r.inputGainsDb = j.value("input_gains_db", std::map<std::string, double>{});
+    // Likewise added later; configs predating it get the default-on
+    // behavior, which is what they effectively had already.
+    r.autoConnect = j.value("auto_connect", true);
+    // Also added later. Absent, or anything other than exactly two names,
+    // means "device default" - the pre-channel-pair behavior.
+    const auto channels = j.value("channels", std::vector<std::string>{});
+    if (channels.size() == 2) {
+        r.leftChannel = channels[0];
+        r.rightChannel = channels[1];
+    }
 }
 
 void to_json(nlohmann::json& j, const AppConfig& c) {
@@ -103,14 +115,37 @@ void saveConfig(const AppConfig& config) {
     const std::string path = configFilePath();
     std::filesystem::create_directories(std::filesystem::path(path).parent_path());
 
-    std::ofstream out(path);
-    if (!out.is_open()) {
-        std::cerr << "pipeeq: failed to write config at " << path << "\n";
-        return;
+    // Write-then-rename rather than truncating the real file in place: this
+    // is rewritten on every slider move, so a crash or full disk midway
+    // through would otherwise leave a half-written config that parses as
+    // "no routes at all" and loses every saved EQ curve.
+    const std::string tempPath = path + ".tmp";
+    {
+        std::ofstream out(tempPath, std::ios::binary | std::ios::trunc);
+        if (!out.is_open()) {
+            std::cerr << "pipeeq: failed to write config at " << tempPath << "\n";
+            return;
+        }
+
+        nlohmann::json j = config;
+        out << j.dump(2) << '\n';
+        out.flush();
+        if (!out.good()) {
+            std::cerr << "pipeeq: failed to write config at " << tempPath << "\n";
+            out.close();
+            std::error_code ignored;
+            std::filesystem::remove(tempPath, ignored);
+            return;
+        }
     }
 
-    nlohmann::json j = config;
-    out << j.dump(2);
+    std::error_code ec;
+    std::filesystem::rename(tempPath, path, ec);
+    if (ec) {
+        std::cerr << "pipeeq: failed to replace config at " << path << ": " << ec.message() << "\n";
+        std::error_code ignored;
+        std::filesystem::remove(tempPath, ignored);
+    }
 }
 
 } // namespace eqcore

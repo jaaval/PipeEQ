@@ -77,24 +77,20 @@ struct RouteSnapshot {
     std::array<InputMixSlot, 8> inputs{};
 };
 
-struct RouteInfo {
-    std::string id;
-    std::string deviceName;
-    std::string displayName;
-    double gainDb = 0.0;
-    bool muted = false;
-    std::size_t bandCount = 0;
-};
-
 // One physical output route: a playback stream pinned to a target device,
 // mixing any number of subscribed inputs, then running the mix through a
 // parametric EqChain-equivalent and a master gain/mute.
 //
+// This object exists only while its target device does; the route's
+// user-visible configuration (gain, mute, EQ, mix levels) is owned by
+// AudioEngine::RouteEntry and outlives it, so a device disappearing tears
+// down the stream without losing any settings. Nothing here is a source of
+// truth for the control plane - it is write-mostly, driven from the entry.
+//
 // Threading model: all mutators (setGainDb/setMuted/setBandCount/setBand/
-// setInputGainDb/removeInputSlot) are only ever called from the D-Bus
-// dispatch thread (sdbus-c++ serializes incoming method calls onto one
-// thread) or, at startup, from the main thread before that dispatch thread
-// starts - so they never race each other. They DO race onProcess(), which
+// setInputGainDb/removeInputSlot) are called only under
+// AudioEngine::controlMutex_, so they never race each other. They DO race
+// onProcess(), which
 // runs on PipeWire's realtime thread when PW_STREAM_FLAG_RT_PROCESS is set
 // (true here) - pw_thread_loop_lock() does not protect against this (see
 // InterleavedRingBuffer's comment). RT-visible state is therefore split
@@ -108,8 +104,15 @@ public:
     static constexpr std::size_t kMaxBands = 16;
     static constexpr std::size_t kMaxInputs = 8;
 
+    // leftPosition/rightPosition are the SPA channel positions this output
+    // drives on the target device. Pass SPA_AUDIO_CHANNEL_UNKNOWN for both to
+    // let the device decide, which is what devices with no layout PipeEQ
+    // recognizes get; otherwise the stream is pinned to exactly that pair, so
+    // several outputs can share one multi-channel interface without bleeding
+    // into each other's channels.
     OutputRoute(pw_core* core, pw_thread_loop* loop, std::string id, std::string deviceName,
-                std::string displayName, uint32_t targetNodeId, int numChannels, uint32_t sampleRateHz);
+                std::string displayName, uint32_t targetNodeId, int numChannels, uint32_t sampleRateHz,
+                uint32_t leftPosition, uint32_t rightPosition);
     ~OutputRoute();
 
     OutputRoute(const OutputRoute&) = delete;
@@ -124,7 +127,6 @@ public:
 
     void setBandCount(std::size_t count);
     void setBand(std::size_t index, const eqcore::EqBand& band);
-    std::vector<eqcore::EqBand> bands() const;
 
     // Activates (if not already active) or updates this route's mix level
     // for the given input. `buffer` is only used the first time this input
@@ -135,9 +137,6 @@ public:
     // Deactivates this route's mix slot for the given input, freeing it for
     // reuse. No-op if not currently active.
     void removeInputSlot(const std::string& inputId);
-    std::vector<std::pair<std::string, double>> inputGainsDb() const;
-
-    RouteInfo info() const;
 
     static void onProcess(void* userdata);
     static void onStateChanged(void* userdata, pw_stream_state old, pw_stream_state state,

@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include <QBrush>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
@@ -13,6 +14,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QPalette>
 #include <QPushButton>
 #include <QSlider>
 #include <QSpinBox>
@@ -74,12 +76,28 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), dbus_(new DbusCli
 
     auto* controlsRow = new QHBoxLayout();
     muteCheck_ = new QCheckBox("Mute");
+    autoConnectCheck_ = new QCheckBox("Auto-connect");
+    autoConnectCheck_->setToolTip(
+        "Connect this output as soon as its device is available - at startup if it's already there, or "
+        "later whenever it appears (e.g. when you power on or plug in the device).");
     gainSlider_ = new QSlider(Qt::Horizontal);
     gainSlider_->setRange(-60, 12);
     gainLabel_ = new QLabel("0 dB");
     gainLabel_->setMinimumWidth(60);
 
+    channelLabel_ = new QLabel("Channels:");
+    channelCombo_ = new QComboBox();
+    // Let it size to its contents: clipped to its default width, "Front L/R"
+    // renders as "Front L/F", which reads as a typo rather than a truncation.
+    channelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    channelCombo_->setToolTip(
+        "Which stereo pair of the device this output drives. A 4-channel interface can host one output on "
+        "outputs 1/2 and another on 3/4, each with its own EQ.");
+
     controlsRow->addWidget(muteCheck_);
+    controlsRow->addWidget(autoConnectCheck_);
+    controlsRow->addWidget(channelLabel_);
+    controlsRow->addWidget(channelCombo_);
     controlsRow->addWidget(new QLabel("Gain:"));
     controlsRow->addWidget(gainSlider_, 1);
     controlsRow->addWidget(gainLabel_);
@@ -148,6 +166,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), dbus_(new DbusCli
     connect(addButton_, &QPushButton::clicked, this, &MainWindow::onAddRouteClicked);
     connect(removeButton_, &QPushButton::clicked, this, &MainWindow::onRemoveRouteClicked);
     connect(muteCheck_, &QCheckBox::toggled, this, &MainWindow::onMuteToggled);
+    connect(autoConnectCheck_, &QCheckBox::toggled, this, &MainWindow::onAutoConnectToggled);
+    connect(channelCombo_, &QComboBox::currentIndexChanged, this, &MainWindow::onChannelPairChanged);
     connect(gainSlider_, &QSlider::valueChanged, this, &MainWindow::onGainSliderChanged);
     connect(bandCountSpin_, &QSpinBox::valueChanged, this, &MainWindow::onBandCountChanged);
     connect(copyEqButton_, &QPushButton::clicked, this, &MainWindow::onCopyEqClicked);
@@ -161,8 +181,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), dbus_(new DbusCli
     refreshInputs();
     refreshRoutes();
 
+    // The daemon connects outputs on its own as devices come and go, and it
+    // can't signal that from the thread it happens on, so poll for it. This
+    // also picks up the device list for the "Add" combo.
     auto* pollTimer = new QTimer(this);
-    connect(pollTimer, &QTimer::timeout, this, &MainWindow::refreshDevices);
+    connect(pollTimer, &QTimer::timeout, this, [this] {
+        refreshDevices();
+        refreshRoutes();
+    });
     pollTimer->start(3000);
 }
 
@@ -172,7 +198,13 @@ void MainWindow::onAddRouteClicked() {
         return;
     }
     const DeviceRow& device = devices_[static_cast<std::size_t>(idx)];
-    const QString routeId = dbus_->addRoute(device.nodeName, device.description);
+    // Name the output after the pair when the device offers more than one, so
+    // "Scarlett — Front L/R" and "Scarlett — Rear L/R" are tellable apart.
+    const QString baseName = device.description.isEmpty() ? device.nodeName : device.description;
+    const QString name = (pairCountForDevice(device.nodeName) > 1 && !device.pairLabel.isEmpty())
+                              ? baseName + " — " + device.pairLabel
+                              : baseName;
+    const QString routeId = dbus_->addRoute(device.nodeName, name, device.leftChannel, device.rightChannel);
     if (routeId.isEmpty()) {
         statusLabel_->setText("Failed to add route - is pipeeq-daemon running?");
         return;
@@ -218,6 +250,60 @@ void MainWindow::onMuteToggled(bool checked) {
         return;
     }
     dbus_->setRouteMute(currentRouteId_, checked);
+}
+
+void MainWindow::onAutoConnectToggled(bool checked) {
+    if (suppressSignals_ || currentRouteId_.isEmpty()) {
+        return;
+    }
+    dbus_->setRouteAutoConnect(currentRouteId_, checked);
+    refreshRoutes();
+}
+
+void MainWindow::rebuildChannelCombo(const RouteRow& route) {
+    const bool wasSuppressed = suppressSignals_;
+    suppressSignals_ = true;
+
+    channelCombo_->clear();
+    for (const auto& d : devices_) {
+        if (d.nodeName == route.deviceName) {
+            channelCombo_->addItem(d.pairLabel.isEmpty() ? "Device default" : d.pairLabel,
+                                    d.leftChannel + '\n' + d.rightChannel);
+        }
+    }
+
+    const QString current = route.leftChannel + '\n' + route.rightChannel;
+    int index = channelCombo_->findData(current);
+    if (index < 0) {
+        // The device is gone, or its profile no longer offers this pair. Show
+        // the configured pair anyway rather than silently snapping the output
+        // onto a different one.
+        const QString label = route.leftChannel.isEmpty()
+                                   ? "Device default"
+                                   : QString("%1/%2 (unavailable)").arg(route.leftChannel, route.rightChannel);
+        channelCombo_->addItem(label, current);
+        index = channelCombo_->count() - 1;
+    }
+    channelCombo_->setCurrentIndex(index);
+
+    // Nothing to choose between for an ordinary stereo device.
+    const bool hasChoice = channelCombo_->count() > 1;
+    channelCombo_->setVisible(hasChoice);
+    channelLabel_->setVisible(hasChoice);
+
+    suppressSignals_ = wasSuppressed;
+}
+
+void MainWindow::onChannelPairChanged(int index) {
+    if (suppressSignals_ || currentRouteId_.isEmpty() || index < 0) {
+        return;
+    }
+    const QStringList parts = channelCombo_->itemData(index).toString().split('\n');
+    if (parts.size() != 2) {
+        return;
+    }
+    dbus_->setRouteChannels(currentRouteId_, parts[0], parts[1]);
+    refreshRoutes();
 }
 
 void MainWindow::onBandCountChanged(int count) {
@@ -349,14 +435,66 @@ void MainWindow::onDaemonInputsChanged() {
     refreshInputs();
 }
 
+void MainWindow::applyRouteItem(QListWidgetItem* item, const RouteRow& route) const {
+    const QString name = route.displayName.isEmpty() ? route.deviceName : route.displayName;
+
+    if (route.connected) {
+        item->setText(name);
+        item->setToolTip(route.deviceName);
+        item->setForeground(QBrush());
+        return;
+    }
+
+    // Dimmed *and* labelled: the suffix is what actually carries the state,
+    // so it still reads without relying on the color.
+    if (channelsUnavailable(route)) {
+        // The device is right there, so "waiting for device" would be a lie
+        // and leave the user with nothing to act on.
+        item->setText(name + "  (channels n/a)");
+        item->setToolTip(QString("%1\n\nThe device is available but doesn't currently offer channels %2/%3 - "
+                                  "its profile may have changed. Pick another pair under Channels.")
+                              .arg(route.deviceName, route.leftChannel, route.rightChannel));
+        item->setForeground(routeList_->palette().brush(QPalette::Disabled, QPalette::Text));
+        return;
+    }
+
+    item->setText(name + (route.autoConnect ? "  (waiting)" : "  (off)"));
+    item->setToolTip(route.autoConnect
+                          ? QString("%1\n\nDevice isn't available; this output will connect as soon as it is.")
+                                .arg(route.deviceName)
+                          : QString("%1\n\nDevice isn't available and auto-connect is off for this output.")
+                                .arg(route.deviceName));
+    item->setForeground(routeList_->palette().brush(QPalette::Disabled, QPalette::Text));
+}
+
 void MainWindow::refreshRoutes() {
-    routes_ = dbus_->listRoutes();
+    const std::vector<RouteRow> updated = dbus_->listRoutes();
+
+    bool sameRoutes = updated.size() == routes_.size();
+    for (std::size_t i = 0; sameRoutes && i < updated.size(); ++i) {
+        sameRoutes = updated[i].id == routes_[i].id;
+    }
+    routes_ = updated;
+
+    // Rebuilding the list destroys and recreates its items, which changes the
+    // current item and so reloads the whole detail pane. Avoid that unless the
+    // set of outputs actually changed, since this also runs on a timer and on
+    // every RouteChanged the daemon emits.
+    if (sameRoutes) {
+        for (int i = 0; i < routeList_->count(); ++i) {
+            applyRouteItem(routeList_->item(i), routes_[static_cast<std::size_t>(i)]);
+        }
+        updateRouteStatus();
+        return;
+    }
+
     const QString previous = currentRouteId_;
 
     routeList_->clear();
     QListWidgetItem* toSelect = nullptr;
     for (const auto& r : routes_) {
-        auto* item = new QListWidgetItem(r.displayName.isEmpty() ? r.deviceName : r.displayName);
+        auto* item = new QListWidgetItem();
+        applyRouteItem(item, r);
         item->setData(Qt::UserRole, r.id);
         routeList_->addItem(item);
         if (r.id == previous) {
@@ -371,16 +509,83 @@ void MainWindow::refreshRoutes() {
     }
 }
 
+void MainWindow::updateRouteStatus() {
+    const RouteRow* route = findRoute(currentRouteId_);
+    if (!route) {
+        return;
+    }
+
+    // A band count that no longer matches the table means something other
+    // than this window changed the EQ, so the tables really do need rebuilding.
+    if (route->bandCount != static_cast<uint32_t>(bandTable_->rowCount())) {
+        loadRouteDetail(*route);
+        return;
+    }
+
+    suppressSignals_ = true;
+    muteCheck_->setChecked(route->muted);
+    autoConnectCheck_->setChecked(route->autoConnect);
+    gainSlider_->setValue(static_cast<int>(std::lround(route->gainDb)));
+    gainLabel_->setText(QString::number(route->gainDb, 'f', 1) + " dB");
+    suppressSignals_ = false;
+
+    rebuildChannelCombo(*route);
+}
+
+int MainWindow::pairCountForDevice(const QString& nodeName) const {
+    int count = 0;
+    for (const auto& d : devices_) {
+        if (d.nodeName == nodeName) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+bool MainWindow::channelsUnavailable(const RouteRow& route) const {
+    bool devicePresent = false;
+    for (const auto& d : devices_) {
+        if (d.nodeName != route.deviceName) {
+            continue;
+        }
+        devicePresent = true;
+        if (d.leftChannel == route.leftChannel && d.rightChannel == route.rightChannel) {
+            return false;
+        }
+    }
+    return devicePresent;
+}
+
 void MainWindow::refreshDevices() {
     devices_ = dbus_->listDevices();
 
+    const QString previous = deviceCombo_->currentData().toString();
     deviceCombo_->clear();
     for (const auto& d : devices_) {
-        deviceCombo_->addItem(d.description.isEmpty() ? d.nodeName : d.description);
+        const QString name = d.description.isEmpty() ? d.nodeName : d.description;
+        // Only spell out the pair for devices that actually offer a choice,
+        // so an ordinary stereo sink stays a single plain entry.
+        const QString label = (pairCountForDevice(d.nodeName) > 1 && !d.pairLabel.isEmpty())
+                                   ? name + "  —  " + d.pairLabel
+                                   : name;
+        deviceCombo_->addItem(label, d.nodeName + '\n' + d.leftChannel + '\n' + d.rightChannel);
+    }
+    const int restored = deviceCombo_->findData(previous);
+    if (restored >= 0) {
+        deviceCombo_->setCurrentIndex(restored);
     }
 
-    statusLabel_->setText(devices_.empty() ? "No output devices found (or pipeeq-daemon isn't running)"
-                                            : QString("%1 output device(s) available").arg(devices_.size()));
+    // Count real devices, not pair entries - two rows for one interface
+    // shouldn't read as two devices.
+    QSet<QString> uniqueDevices;
+    for (const auto& d : devices_) {
+        uniqueDevices.insert(d.nodeName);
+    }
+    statusLabel_->setText(uniqueDevices.isEmpty()
+                               ? "No output devices found (or pipeeq-daemon isn't running)"
+                               : QString("%1 output device(s), %2 selectable stereo pair(s)")
+                                     .arg(uniqueDevices.size())
+                                     .arg(devices_.size()));
 }
 
 void MainWindow::refreshInputs() {
@@ -403,10 +608,13 @@ void MainWindow::selectRoute(const QString& routeId) {
 void MainWindow::loadRouteDetail(const RouteRow& route) {
     suppressSignals_ = true;
     muteCheck_->setChecked(route.muted);
+    autoConnectCheck_->setChecked(route.autoConnect);
     gainSlider_->setValue(static_cast<int>(std::lround(route.gainDb)));
     gainLabel_->setText(QString::number(route.gainDb, 'f', 1) + " dB");
     bandCountSpin_->setValue(static_cast<int>(route.bandCount));
     suppressSignals_ = false;
+
+    rebuildChannelCombo(route);
 
     const auto bands = dbus_->getRouteBands(route.id);
     rebuildBandTable(bands);

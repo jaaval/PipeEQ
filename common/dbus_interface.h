@@ -27,6 +27,8 @@ inline constexpr const char* kMethodSetRouteInputGain = "SetRouteInputGain";
 inline constexpr const char* kMethodRemoveRouteInput = "RemoveRouteInput";
 inline constexpr const char* kMethodGetRouteInputGains = "GetRouteInputGains";
 inline constexpr const char* kMethodGetMixMatrix = "GetMixMatrix";
+inline constexpr const char* kMethodSetRouteAutoConnect = "SetRouteAutoConnect";
+inline constexpr const char* kMethodSetRouteChannels = "SetRouteChannels";
 
 // Signals
 inline constexpr const char* kSignalDevicesChanged = "DevicesChanged";

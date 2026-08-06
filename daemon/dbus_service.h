@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -26,9 +27,25 @@ public:
     void start();
     void stop();
 
+    // Drives the engine's device reconciliation (connecting outputs whose
+    // hardware has appeared). Called from the main thread's loop, not from
+    // the D-Bus dispatch thread - so it deliberately doesn't emit signals,
+    // since the sd-bus connection is being dispatched on that other thread
+    // and isn't safe to write from two threads at once. The GUI notices the
+    // resulting connected/disconnected state via its periodic refresh.
+    void tick();
+
 private:
-    using DeviceRow = sdbus::Struct<uint32_t, std::string, std::string>;
-    using RouteRow = sdbus::Struct<std::string, std::string, std::string, double, bool, uint32_t>;
+    // One row per selectable stereo pair, so a 4.0 interface appears twice:
+    // nodeId, nodeName, description, pairLabel, leftChannel, rightChannel.
+    // leftChannel/rightChannel are empty for a device whose layout PipeEQ
+    // doesn't recognize, meaning "let the device decide".
+    using DeviceRow =
+        sdbus::Struct<uint32_t, std::string, std::string, std::string, std::string, std::string>;
+    // id, deviceName, displayName, gainDb, muted, bandCount, connected,
+    // autoConnect, leftChannel, rightChannel
+    using RouteRow = sdbus::Struct<std::string, std::string, std::string, double, bool, uint32_t, bool, bool,
+                                    std::string, std::string>;
     using BandRow = sdbus::Struct<std::string, double, double, double>;
     using InputRow = sdbus::Struct<std::string, std::string>;
     using InputGainRow = sdbus::Struct<std::string, double>;
@@ -43,13 +60,17 @@ private:
     std::vector<MixMatrixRow> getMixMatrix();
     StateRow getState();
 
-    std::string addRoute(const std::string& deviceName, const std::string& displayName);
+    std::string addRoute(const std::string& deviceName, const std::string& displayName,
+                          const std::string& leftChannel, const std::string& rightChannel);
     void removeRoute(const std::string& routeId);
     bool setRouteGain(const std::string& routeId, double gainDb);
     bool setRouteMute(const std::string& routeId, bool muted);
     bool setRouteBandCount(const std::string& routeId, uint32_t count);
     bool setRouteBand(const std::string& routeId, uint32_t index, const std::string& type, double freqHz,
                        double gainDb, double q);
+    bool setRouteAutoConnect(const std::string& routeId, bool autoConnect);
+    bool setRouteChannels(const std::string& routeId, const std::string& leftChannel,
+                           const std::string& rightChannel);
 
     std::string addInput(const std::string& displayName);
     void removeInput(const std::string& inputId);
@@ -63,6 +84,9 @@ private:
     AudioEngine& engine_;
     std::unique_ptr<sdbus::IConnection> connection_;
     std::unique_ptr<sdbus::IObject> object_;
+    // Serializes gather-then-write so two concurrent saves can't interleave
+    // into the config file.
+    std::mutex persistMutex_;
 };
 
 } // namespace pipeeq

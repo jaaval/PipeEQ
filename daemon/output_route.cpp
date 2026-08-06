@@ -7,6 +7,8 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/pod/builder.h>
 
+#include "audio_format.h"
+
 namespace pipeeq {
 
 InterleavedRingBuffer::InterleavedRingBuffer(std::size_t capacityFrames, int numChannels)
@@ -66,7 +68,7 @@ const pw_stream_events kOutputRouteStreamEvents = {
 
 OutputRoute::OutputRoute(pw_core* core, pw_thread_loop* /*loop*/, std::string id, std::string deviceName,
                           std::string displayName, uint32_t targetNodeId, int numChannels,
-                          uint32_t sampleRateHz)
+                          uint32_t sampleRateHz, uint32_t leftPosition, uint32_t rightPosition)
     : id_(std::move(id)),
       deviceName_(std::move(deviceName)),
       displayName_(std::move(displayName)),
@@ -77,10 +79,22 @@ OutputRoute::OutputRoute(pw_core* core, pw_thread_loop* /*loop*/, std::string id
     snapshot_.store(std::make_shared<const RouteSnapshot>());
 
     const std::string nodeName = "pipeeq_route_" + id_;
+    // A pair is two positions, so this only applies to a stereo stream.
+    const bool pinnedToPair = numChannels_ == 2 && leftPosition != SPA_AUDIO_CHANNEL_UNKNOWN &&
+                              rightPosition != SPA_AUDIO_CHANNEL_UNKNOWN;
 
     pw_properties* props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Playback",
                                                PW_KEY_MEDIA_ROLE, "Music", PW_KEY_NODE_NAME, nodeName.c_str(),
                                                PW_KEY_NODE_DESCRIPTION, displayName_.c_str(), nullptr);
+
+    if (pinnedToPair) {
+        // Without this the adapter upmixes a stereo stream across the target's
+        // whole layout: on a 4.0 interface one output ends up driving all four
+        // ports, so the monitor and headphone pairs get the same signal and
+        // can't be EQ'd apart. With it, the stream links only to the two ports
+        // matching the positions set below.
+        pw_properties_set(props, PW_KEY_STREAM_DONT_REMIX, "true");
+    }
 
     stream_ = pw_stream_new(core, ("pipeeq route " + displayName_).c_str(), props);
     pw_stream_add_listener(stream_, &listener_, &kOutputRouteStreamEvents, this);
@@ -92,6 +106,15 @@ OutputRoute::OutputRoute(pw_core* core, pw_thread_loop* /*loop*/, std::string id
     info.format = SPA_AUDIO_FORMAT_F32;
     info.channels = static_cast<uint32_t>(numChannels_);
     info.rate = sampleRateHz;
+    if (pinnedToPair) {
+        info.position[0] = leftPosition;
+        info.position[1] = rightPosition;
+    } else {
+        // Same reason as InputSource: without positions this connects as
+        // aux0/aux1, so the target device can't map the pair to its own
+        // left/right and may remix instead of passing it through.
+        fillChannelPositions(info, numChannels_);
+    }
 
     const spa_pod* params[1];
     params[0] = spa_format_audio_raw_build(&podBuilder, SPA_PARAM_EnumFormat, &info);
@@ -128,10 +151,6 @@ void OutputRoute::setBandCount(std::size_t count) {
 void OutputRoute::setBand(std::size_t index, const eqcore::EqBand& band) {
     bands_.at(index) = band;
     rebuildSnapshot();
-}
-
-std::vector<eqcore::EqBand> OutputRoute::bands() const {
-    return bands_;
 }
 
 int OutputRoute::findSlot(const std::string& inputId) const {
@@ -177,20 +196,6 @@ void OutputRoute::removeInputSlot(const std::string& inputId) {
     }
     inputSlotsMirror_[static_cast<std::size_t>(slot)] = InputMixSlot{};
     rebuildSnapshot();
-}
-
-std::vector<std::pair<std::string, double>> OutputRoute::inputGainsDb() const {
-    std::vector<std::pair<std::string, double>> result;
-    for (const auto& slot : inputSlotsMirror_) {
-        if (slot.active) {
-            result.emplace_back(slot.inputId, 20.0 * std::log10(static_cast<double>(slot.gainLinear)));
-        }
-    }
-    return result;
-}
-
-RouteInfo OutputRoute::info() const {
-    return RouteInfo{id_, deviceName_, displayName_, gainDb_, muted_, bands_.size()};
 }
 
 void OutputRoute::rebuildSnapshot() {
