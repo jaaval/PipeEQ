@@ -7,8 +7,6 @@
 #include "eq_curve_widget.h"
 #include "model/app_state.h"
 
-class QListWidget;
-class QListWidgetItem;
 class QComboBox;
 class QPushButton;
 class QCheckBox;
@@ -19,6 +17,8 @@ class QTableWidget;
 class QTabWidget;
 
 namespace pipeeq {
+
+class StripRack;
 
 // Transitional window: the same layout as before, but a row in the left-hand
 // list is now one hardware output CHANNEL rather than one stereo-pair output.
@@ -36,7 +36,7 @@ public:
 private slots:
     void onAddOutputClicked();
     void onRemoveOutputClicked();
-    void onStripSelectionChanged();
+    void onRackSelectionChanged(const QString& stripId);
     void onGainSliderChanged(int value);
     void onGainSliderPressed();
     void onGainSliderReleased();
@@ -66,10 +66,6 @@ private:
     // tables alone - rebuilding those on a refresh would yank widgets out from
     // under a slider the user is dragging.
     void updateStripStatus();
-    // Sets one list row's text/tooltip/color from its connected and
-    // auto-connect state. The label is kept short because the list is narrow;
-    // the tooltip carries the detail.
-    void applyStripItem(QListWidgetItem* item, const StripRow& strip) const;
     // Fills the position dropdown with the channel positions the selected
     // strip's device advertises, and selects the one it currently claims.
     void rebuildPositionCombo(const StripRow& strip);
@@ -86,7 +82,7 @@ private:
 
     AppState* state_;
 
-    QListWidget* stripList_ = nullptr;
+    StripRack* stripRack_ = nullptr;
     QComboBox* deviceCombo_ = nullptr;
     QPushButton* addButton_ = nullptr;
     QPushButton* removeButton_ = nullptr;

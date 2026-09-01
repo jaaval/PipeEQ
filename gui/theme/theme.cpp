@@ -79,7 +79,11 @@ QMenu::item { padding: 4px 20px 4px 20px; }
 QHeaderView::section { padding: 3px 6px; border: 0; border-right: 1px solid #2e2f33; }
 )";
 
-Tokens tokensFromPalette(const QPalette& palette) {
+// Colours only. Fonts and metrics are deliberately NOT derived here: resolving
+// the numeric font involves a QFontDatabase lookup, and this runs per widget on
+// every palette query - which, before this split, meant a font-database search
+// per strip per meter tick. That alone was most of the GUI's CPU time.
+Tokens colorsFromPalette(const QPalette& palette) {
     Tokens tokens;
 
     tokens.background = palette.color(QPalette::Window);
@@ -113,6 +117,11 @@ Tokens tokensFromPalette(const QPalette& palette) {
     tokens.handle = tokens.accent;
     tokens.handleSelected = QColor(0xff, 0xd2, 0x6b);
 
+    return tokens;
+}
+
+// Resolved once, in install(). See colorsFromPalette for why.
+void resolveFonts(Tokens& tokens) {
     tokens.uiFont = QApplication::font();
 
     QFont numeric = tokens.uiFont;
@@ -120,12 +129,13 @@ Tokens tokensFromPalette(const QPalette& palette) {
     // has the feature, hence the monospace fallback below.
     numeric.setFeature("tnum", 1);
     if (!QFontInfo(numeric).fixedPitch()) {
-        numeric.setFamilies(QFontDatabase::families(QFontDatabase::Latin).filter("Mono"));
+        const QStringList monospaced = QFontDatabase::families(QFontDatabase::Latin).filter("Mono");
+        if (!monospaced.isEmpty()) {
+            numeric.setFamilies(monospaced);
+        }
         numeric.setStyleHint(QFont::Monospace);
     }
     tokens.numericFont = numeric;
-
-    return tokens;
 }
 
 } // namespace
@@ -154,7 +164,8 @@ void install(QApplication& app) {
     app.setStyle(QStyleFactory::create("Fusion"));
     app.setPalette(darkPalette());
     app.setStyleSheet(QString::fromLatin1(kStyleSheet));
-    g_tokens = tokensFromPalette(app.palette());
+    g_tokens = colorsFromPalette(app.palette());
+    resolveFonts(g_tokens);
 }
 
 const Tokens& tokens() {
@@ -162,12 +173,14 @@ const Tokens& tokens() {
 }
 
 Tokens tokensFor(const QWidget* widget) {
-    if (!widget) {
+    if (!widget || widget->palette() == QApplication::palette()) {
         return g_tokens;
     }
-    Tokens tokens = tokensFromPalette(widget->palette());
-    // Metrics aren't derived from the palette, so carry the installed ones over
-    // rather than silently resetting them to the struct's defaults.
+    Tokens tokens = colorsFromPalette(widget->palette());
+    // Fonts and metrics aren't palette-derived, so carry the installed ones
+    // over rather than silently resetting them to the struct's defaults.
+    tokens.uiFont = g_tokens.uiFont;
+    tokens.numericFont = g_tokens.numericFont;
     tokens.stripWidth = g_tokens.stripWidth;
     tokens.faderWidth = g_tokens.faderWidth;
     tokens.meterWidth = g_tokens.meterWidth;

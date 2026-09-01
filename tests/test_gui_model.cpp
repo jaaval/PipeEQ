@@ -13,6 +13,7 @@
 #include "model/edit_guard.h"
 #include "model/level_meters.h"
 #include "model/write_coalescer.h"
+#include "widgets/fader_taper.h"
 
 #include "check.h"
 
@@ -378,6 +379,63 @@ void testUnknownChannelReadsAsSilence() {
     CHECK(!meters.clipped("nope", 3));
 }
 
+// ---------------------------------------------------------------- the taper --
+
+// The fader and the meter share this mapping so that 0 dB lands at the same
+// height on both. If it stops round-tripping, one of them silently misreads the
+// other's scale.
+void testTaperRoundTrips() {
+    for (double db : {-65.0, -50.0, -40.0, -30.0, -20.0, -12.0, -6.0, -3.0, 0.0, 3.0, 6.0, 12.0}) {
+        CHECK_NEAR(taper::normToDb(taper::dbToNorm(db)), db, 0.01);
+    }
+    for (double norm = 0.05; norm <= 1.0; norm += 0.05) {
+        CHECK_NEAR(taper::dbToNorm(taper::normToDb(norm)), norm, 0.01);
+    }
+}
+
+void testTaperIsMonotonic() {
+    double previous = -1.0;
+    for (double db = taper::kMinDb; db <= taper::kMaxDb; db += 0.25) {
+        const double norm = taper::dbToNorm(db);
+        CHECK(norm >= previous);
+        previous = norm;
+    }
+}
+
+// The whole reason for a piecewise taper: the useful range must get most of the
+// travel. Linear in dB would give -12..0 only about 17% of it.
+void testTaperGivesTheUsefulRangeMostOfTheTravel() {
+    const double unity = taper::dbToNorm(0.0);
+    CHECK_NEAR(unity, 0.80, 0.001);
+
+    const double topFortyDb = unity - taper::dbToNorm(-40.0);
+    CHECK(topFortyDb > 0.60); // -40..0 dB occupies over 60% of the travel
+
+    const double usefulBand = unity - taper::dbToNorm(-12.0);
+    CHECK(usefulBand > 0.25); // -12..0 dB alone gets over a quarter
+}
+
+void testTaperEndsAndDetent() {
+    CHECK_NEAR(taper::dbToNorm(taper::kMaxDb), 1.0, 1e-9);
+    CHECK_NEAR(taper::dbToNorm(24.0), 1.0, 1e-9); // clamps rather than extrapolating
+
+    // Bottom of the travel is a hard-off detent, not merely very quiet.
+    CHECK_NEAR(taper::dbToNorm(taper::kSilenceDb), 0.0, 1e-9);
+    CHECK_NEAR(taper::normToDb(0.0), taper::kSilenceDb, 1e-9);
+    CHECK(taper::isSilent(taper::kMinDb));
+    CHECK(taper::isSilent(-200.0));
+    CHECK(!taper::isSilent(-60.0));
+}
+
+// 0.1 dB has to be resolvable by a pixel near unity, or the fader can't be set
+// as precisely as the readout claims.
+void testTaperResolutionNearUnity() {
+    constexpr double kTravelPx = 300.0;
+    const double dbPerPixel =
+        (0.0 - (-1.0)) / ((taper::dbToNorm(0.0) - taper::dbToNorm(-1.0)) * kTravelPx);
+    CHECK(dbPerPixel < 0.25);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -404,6 +462,12 @@ int main(int argc, char** argv) {
     RUN(testPeakHoldLingersThenFollows);
     RUN(testDisarmingResetsToSilence);
     RUN(testUnknownChannelReadsAsSilence);
+
+    RUN(testTaperRoundTrips);
+    RUN(testTaperIsMonotonic);
+    RUN(testTaperGivesTheUsefulRangeMostOfTheTravel);
+    RUN(testTaperEndsAndDetent);
+    RUN(testTaperResolutionNearUnity);
 
     return pipeeq::test::summary("gui_model");
 }

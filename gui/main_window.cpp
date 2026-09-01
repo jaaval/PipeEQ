@@ -1,5 +1,7 @@
 #include "main_window.h"
 
+#include "widgets/strip_rack.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -64,35 +66,24 @@ MainWindow::MainWindow(AppState* state, QWidget* parent) : QMainWindow(parent), 
     resize(1000, 640);
 
     auto* central = new QWidget(this);
-    auto* rootLayout = new QHBoxLayout(central);
+    auto* rootLayout = new QVBoxLayout(central);
+    rootLayout->setSpacing(8);
 
-    // ---- left: the list of hardware output channels ----
-    auto* leftLayout = new QVBoxLayout;
-    leftLayout->addWidget(new QLabel("Output channels", central));
-
-    stripList_ = new QListWidget(central);
-    connect(stripList_, &QListWidget::itemSelectionChanged, this,
-            &MainWindow::onStripSelectionChanged);
-    leftLayout->addWidget(stripList_, 1);
-
-    auto* addRow = new QHBoxLayout;
+    // ---- top bar: output management ----
+    auto* topBar = new QHBoxLayout;
     deviceCombo_ = new QComboBox(central);
-    addButton_ = new QPushButton("Add", central);
+    deviceCombo_->setMinimumWidth(260);
+    addButton_ = new QPushButton("Add output", central);
     connect(addButton_, &QPushButton::clicked, this, &MainWindow::onAddOutputClicked);
-    addRow->addWidget(deviceCombo_, 1);
-    addRow->addWidget(addButton_);
-    leftLayout->addLayout(addRow);
-
-    removeButton_ = new QPushButton("Remove selected output", central);
+    removeButton_ = new QPushButton("Remove output", central);
     connect(removeButton_, &QPushButton::clicked, this, &MainWindow::onRemoveOutputClicked);
-    leftLayout->addWidget(removeButton_);
+    topBar->addWidget(deviceCombo_);
+    topBar->addWidget(addButton_);
+    topBar->addWidget(removeButton_);
+    topBar->addStretch(1);
+    rootLayout->addLayout(topBar);
 
-    auto* leftContainer = new QWidget(central);
-    leftContainer->setLayout(leftLayout);
-    leftContainer->setMaximumWidth(280);
-    rootLayout->addWidget(leftContainer);
-
-    // ---- right: the selected channel's controls ----
+    // ---- detail area: the selected channel or group ----
     auto* rightLayout = new QVBoxLayout;
 
     auto* controlsRow = new QHBoxLayout;
@@ -180,6 +171,23 @@ MainWindow::MainWindow(AppState* state, QWidget* parent) : QMainWindow(parent), 
     rightContainer->setLayout(rightLayout);
     rootLayout->addWidget(rightContainer, 1);
 
+    // ---- the mixer row, along the bottom ----
+    stripRack_ = new StripRack(state_, central);
+    connect(stripRack_, &StripRack::selectionChanged, this, &MainWindow::onRackSelectionChanged);
+    connect(stripRack_, &StripRack::positionClicked, this, [this](const QString& stripId) {
+        // The position badge is the affordance; the combo above is where the
+        // choice is actually made until the popup grid exists.
+        selectStrip(stripId);
+        if (positionCombo_->isVisible()) {
+            positionCombo_->showPopup();
+        }
+    });
+    connect(stripRack_, &StripRack::linkToggleRequested, this, [this](const QString& stripId) {
+        Q_UNUSED(stripId);
+        statusLabel_->setText("Linking and unlinking arrive with the grouping work.");
+    });
+    rootLayout->addWidget(stripRack_);
+
     setCentralWidget(central);
 
     statusLabel_ = new QLabel(this);
@@ -190,6 +198,10 @@ MainWindow::MainWindow(AppState* state, QWidget* parent) : QMainWindow(parent), 
     connect(state_, &AppState::channelDetailUpdated, this, &MainWindow::onChannelDetailUpdated);
     connect(state_, &AppState::errorReported, this, &MainWindow::onErrorReported);
     connect(state_, &AppState::availabilityChanged, this, [this](bool) { updateStripStatus(); });
+    // One timer in the store drives every meter; the rack decides which strips
+    // are actually visible and worth repainting.
+    connect(&state_->meters(), &LevelMeters::levelsUpdated, this,
+            [this] { stripRack_->refreshMeters(); });
 
     onTopologyChanged();
     // The store owns the safety resync now, off the GUI thread, so there is no
@@ -235,27 +247,16 @@ void MainWindow::refreshDevices() {
 }
 
 void MainWindow::refreshStrips() {
-    // Rebuilds the list widget from the store's cache. Only called when the
-    // store says the strip SET moved - rebuilding on every value update would
-    // reset the selection and yank the detail pane out from under the user.
+    // Only called when the store says the strip SET moved. The rack reuses its
+    // widgets where it can, so a rebuild can't drop a drag in progress.
     const QString previousSelection = currentStripId_;
-    const bool wasSuppressed = suppressSignals_;
-    suppressSignals_ = true;
-    stripList_->clear();
-    for (const StripRow& strip : state_->strips()) {
-        auto* item = new QListWidgetItem(stripList_);
-        item->setData(Qt::UserRole, strip.id);
-        applyStripItem(item, strip);
-        stripList_->addItem(item);
-    }
-    suppressSignals_ = wasSuppressed;
+    stripRack_->rebuild();
 
-    // Keep the selection if that strip still exists; otherwise fall back to the
-    // first one so the detail pane is never left showing nothing.
     if (findStrip(previousSelection)) {
         selectStrip(previousSelection);
     } else if (!state_->strips().isEmpty()) {
-        selectStrip(state_->strips().front().id);
+        selectStrip(stripRack_->selectedStripId().isEmpty() ? state_->strips().front().id
+                                                            : stripRack_->selectedStripId());
     } else {
         currentStripId_.clear();
         updateStripStatus();
@@ -266,47 +267,11 @@ void MainWindow::refreshInputs() {
     rebuildMixerTable();
 }
 
-void MainWindow::applyStripItem(QListWidgetItem* item, const StripRow& strip) const {
-    QString suffix;
-    QString tooltip;
-    if (channelUnavailable(strip)) {
-        suffix = " (ch n/a)";
-        tooltip = "The device is present but its current profile doesn't offer this channel. "
-                  "The settings are kept and reapplied if it comes back.";
-    } else if (!strip.connected) {
-        suffix = strip.autoConnect ? " (waiting)" : " (off)";
-        tooltip = strip.autoConnect
-                       ? "The device isn't available right now. This channel stays configured and "
-                         "connects as soon as the device appears."
-                       : "Auto-connect is off, so this output won't connect on its own.";
-    } else {
-        tooltip = QString("Driving %1 on %2").arg(strip.position, strip.deviceName);
-    }
-    if (!strip.groupId.isEmpty()) {
-        suffix += " [linked]";
-    }
-
-    item->setText(strip.label() + suffix);
-    item->setToolTip(tooltip);
-    // Dim anything that isn't currently carrying audio, while leaving it fully
-    // editable - that distinction is the whole point of keeping absent outputs.
-    if (strip.connected && strip.driven) {
-        item->setForeground(QBrush());
-    } else {
-        item->setForeground(stripList_->palette().brush(QPalette::Disabled, QPalette::Text));
-    }
-}
-
 void MainWindow::updateStripStatus() {
     const StripRow* strip = findStrip(currentStripId_);
 
-    // Refresh the list labels in place - cheap, and it can't disturb selection.
-    for (int row = 0; row < stripList_->count(); ++row) {
-        QListWidgetItem* item = stripList_->item(row);
-        if (const StripRow* rowStrip = findStrip(item->data(Qt::UserRole).toString())) {
-            applyStripItem(item, *rowStrip);
-        }
-    }
+    // Push current values into the existing strips rather than rebuilding them.
+    stripRack_->refreshValues();
 
     const bool haveStrip = strip != nullptr;
     muteCheck_->setEnabled(haveStrip);
@@ -356,30 +321,15 @@ void MainWindow::updateStripStatus() {
 // ----------------------------------------------------------------- selection --
 
 void MainWindow::selectStrip(const QString& stripId) {
-    for (int row = 0; row < stripList_->count(); ++row) {
-        if (stripList_->item(row)->data(Qt::UserRole).toString() == stripId) {
-            const bool wasSuppressed = suppressSignals_;
-            suppressSignals_ = true;
-            stripList_->setCurrentRow(row);
-            suppressSignals_ = wasSuppressed;
-            break;
-        }
-    }
+    stripRack_->setSelectedStripId(stripId);
     currentStripId_ = stripId;
     if (const StripRow* strip = findStrip(stripId)) {
         loadStripDetail(*strip);
     }
 }
 
-void MainWindow::onStripSelectionChanged() {
-    if (suppressSignals_) {
-        return;
-    }
-    QListWidgetItem* item = stripList_->currentItem();
-    if (!item) {
-        return;
-    }
-    selectStrip(item->data(Qt::UserRole).toString());
+void MainWindow::onRackSelectionChanged(const QString& stripId) {
+    selectStrip(stripId);
 }
 
 void MainWindow::loadStripDetail(const StripRow& strip) {

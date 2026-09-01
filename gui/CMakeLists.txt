@@ -12,7 +12,11 @@ add_executable(pipeeq-gui
     model/edit_guard.cpp
     model/level_meters.cpp
     model/write_coalescer.cpp
+    theme/paint_helpers.cpp
     theme/theme.cpp
+    widgets/channel_strip.cpp
+    widgets/fader_taper.cpp
+    widgets/strip_rack.cpp
 )
 
 target_include_directories(pipeeq-gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
