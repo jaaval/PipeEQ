@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
+#include <QTimer>
 
 #include "main_window.h"
 #include "model/app_state.h"
@@ -21,6 +22,10 @@ int main(int argc, char** argv) {
     parser.addOption(demoOption);
     QCommandLineOption geometryOption("geometry", "Window size as WxH, e.g. 1280x800.", "WxH");
     parser.addOption(geometryOption);
+    QCommandLineOption openEqOption(
+        "open-eq", "Start on the EQ editor page. For screenshots and scripted checks, which "
+                   "cannot otherwise reach a page that needs a click.");
+    parser.addOption(openEqOption);
     parser.process(app);
 
     // Before any widget exists: the palette has to be in place when widgets
@@ -49,5 +54,11 @@ int main(int argc, char** argv) {
     // Metering is armed once there is something on screen to show it on. The
     // daemon's lease expires by itself, so the store re-arms while this is set.
     state.setMeteringEnabled(true);
+
+    if (parser.isSet(openEqOption)) {
+        // Deferred: the first snapshot has to arrive before there is a selection
+        // for the editor to show.
+        QTimer::singleShot(1200, &window, &pipeeq::MainWindow::showEqEditor);
+    }
     return app.exec();
 }

@@ -4,20 +4,18 @@
 
 #include <QMainWindow>
 
-#include "eq_curve_widget.h"
 #include "model/app_state.h"
 
 class QCheckBox;
 class QComboBox;
 class QLabel;
 class QPushButton;
-class QSpinBox;
 class QStackedWidget;
-class QTableWidget;
 
 namespace pipeeq {
 
 class DetailPanel;
+class EqEditor;
 class StripRack;
 
 // Transitional window: the same layout as before, but a row in the left-hand
@@ -33,15 +31,14 @@ public:
     // coalescer. Ownership of the store stays with the caller.
     explicit MainWindow(AppState* state, QWidget* parent = nullptr);
 
+    // Opens the EQ editor for the current selection. Exists so a screenshot or
+    // a scripted check can reach that page without simulating input.
+    void showEqEditor();
+
 private slots:
     void onAddOutputClicked();
     void onRemoveOutputClicked();
     void onRackSelectionChanged(const QString& stripId);
-    void onBandCountChanged(int count);
-    void onCurveBandEdited(int index, eqcore::EqBand band);
-    void onCurveBandEditBegan(int index);
-    void onCurveBandEditFinished(int index);
-    void onCopyEqClicked();
     void onAddInputClicked();
     void onTopologyChanged();
     void onStripsUpdated();
@@ -60,8 +57,6 @@ private:
     // tables alone - rebuilding those on a refresh would yank widgets out from
     // under a slider the user is dragging.
     void updateStripStatus();
-    void rebuildBandTable(const std::vector<eqcore::EqBand>& bands);
-    void pushBandRow(int row);
     const StripRow* findStrip(const QString& stripId) const;
     // The device row for a strip's target, or null when it isn't present.
     const DeviceRow* findDevice(const QString& nodeName) const;
@@ -75,12 +70,7 @@ private:
     QPushButton* addButton_ = nullptr;
     QPushButton* removeButton_ = nullptr;
 
-    // The EQ editor page. Replaced wholesale by the real editor, with its
-    // instance list and channel-assignment matrix, in the next phase.
-    QSpinBox* bandCountSpin_ = nullptr;
-    QPushButton* copyEqButton_ = nullptr;
-    QTableWidget* bandTable_ = nullptr;
-    EqCurveWidget* curveWidget_ = nullptr;
+    EqEditor* eqEditor_ = nullptr;
 
     QLabel* statusLabel_ = nullptr;
 

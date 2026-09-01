@@ -16,6 +16,7 @@ add_executable(pipeeq-gui
     theme/theme.cpp
     widgets/channel_strip.cpp
     widgets/detail_panel.cpp
+    widgets/eq_editor.cpp
     widgets/eq_preview.cpp
     widgets/fader_taper.cpp
     widgets/send_strip.cpp

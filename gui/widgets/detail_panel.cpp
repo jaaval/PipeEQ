@@ -156,7 +156,7 @@ void DetailPanel::updateHeader() {
         status += strip->autoConnect ? "  ·  waiting for the device" : "  ·  auto-connect off";
     }
     if (!strip->groupId.isEmpty()) {
-        status += "  ·  linked (gain, mute and sends move together)";
+        status += "  ·  linked (gain, mute, sends and EQ move together)";
     }
     subtitle_->setText(status);
 
@@ -293,10 +293,25 @@ void DetailPanel::updateEqPreview() {
 
     const QVector<eqcore::EqBand> cached = state_->channelBands(strip->outputId, strip->channelIndex);
     eqPreview_->setBands(std::vector<eqcore::EqBand>(cached.begin(), cached.end()));
-    eqPreview_->setCaption(cached.isEmpty()
-                                ? QStringLiteral("no EQ on this channel")
-                                : QString("%1 band%2").arg(cached.size())
-                                      .arg(cached.size() == 1 ? "" : "s"));
+
+    QString caption = cached.isEmpty()
+                           ? QStringLiteral("no EQ on this channel")
+                           : QString("%1 band%2").arg(cached.size()).arg(cached.size() == 1 ? "" : "s");
+    // Name the channels this curve also applies to. Linked channels share one
+    // curve, and that is invisible until someone notices both moved.
+    if (!strip->groupId.isEmpty()) {
+        QStringList siblings;
+        for (const StripRow& other : state_->strips()) {
+            if (other.outputId == strip->outputId && other.groupId == strip->groupId &&
+                other.id != strip->id) {
+                siblings << (other.channelName.isEmpty() ? other.position : other.channelName);
+            }
+        }
+        if (!siblings.isEmpty()) {
+            caption += QString("  ·  shared with %1").arg(siblings.join(", "));
+        }
+    }
+    eqPreview_->setCaption(caption);
 }
 
 void DetailPanel::refreshMeters() {

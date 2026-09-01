@@ -130,10 +130,38 @@ else
     # An instance was created on demand and assigned to that channel.
     check "an EQ instance was created on demand" "eq-" "$($BUS call $DEST ListEqInstances s "$REAL_ID")"
 
-    # EQ assignment is deliberately NOT linked - that's the point of per-channel
-    # EQ - so channel 1 must still be flat despite being in the same group.
-    check "channel 1's EQ is independent of channel 0's" "a(sddd) 0" \
+    # Linked channels SHARE one curve: that is what linking means now, and it is
+    # why there is no separate assignment step. Channel 1 is in the same group,
+    # so it must report the same bands.
+    LINKED_BANDS=$($BUS call $DEST GetChannelEqBands su "$REAL_ID" 1)
+    check "a linked channel shares the curve" "250" "$LINKED_BANDS"
+    check "a linked channel shares the gain too" "-4.5" "$LINKED_BANDS"
+    check "both linked channels report one instance" "a(ssubu) 1" \
+        "$($BUS call $DEST ListEqInstances s "$REAL_ID")"
+    check "the shared instance covers 2 channels" "2" \
+        "$($BUS call $DEST ListEqInstances s "$REAL_ID")"
+
+    # ...and unlinking must actually separate them, or "unlink" would only
+    # separate the faders while both channels still shared one curve.
+    check "RemoveLinkGroup succeeds" "b true" \
+        "$($BUS call $DEST RemoveLinkGroup ss "$REAL_ID" "$GROUP_ID")"
+    check "unlinking splits the curve into per-channel copies" "a(ssubu) 2" \
+        "$($BUS call $DEST ListEqInstances s "$REAL_ID")"
+    # Each copy keeps the values, so unlinking changes nothing audible.
+    check "the copy kept its band" "250" "$($BUS call $DEST GetChannelEqBands su "$REAL_ID" 1)"
+    # Editing one now leaves the other alone.
+    $BUS call $DEST SetChannelEqBand suusddd -- "$REAL_ID" 0 0 peaking 900 -1.0 1.0 > /dev/null
+    check "after unlinking, editing one channel leaves the other alone" "250" \
         "$($BUS call $DEST GetChannelEqBands su "$REAL_ID" 1)"
+    check "the edited channel took the new value" "900" \
+        "$($BUS call $DEST GetChannelEqBands su "$REAL_ID" 0)"
+
+    # Re-link, which shares the lowest-index member's curve across the group.
+    GROUP_ID=$($BUS call $DEST CreateLinkGroup saus "$REAL_ID" 2 0 1 Mains | tr -d 's "')
+    check "re-linking shares the leader's curve" "900" \
+        "$($BUS call $DEST GetChannelEqBands su "$REAL_ID" 1)"
+    check "re-linking prunes the orphaned instance" "a(ssubu) 1" \
+        "$($BUS call $DEST ListEqInstances s "$REAL_ID")"
 
     # ---- sends ----
     check "SetSend succeeds" "b true" \

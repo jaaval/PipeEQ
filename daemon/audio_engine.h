@@ -243,8 +243,11 @@ public:
                                 const std::string& displayName);
 
     // Points a channel at one of its output's EQ instances, or at none when
-    // eqInstanceId is empty. Unlike gain and mute this is NOT linked: giving
-    // FL and FR different EQs is the whole point of per-channel EQ.
+    // eqInstanceId is empty.
+    //
+    // Not exposed in the UI: which channels share a curve is decided by LINKING
+    // them, not by a separate assignment step. Kept because the daemon needs it
+    // internally and because a client that wants finer control can still use it.
     bool setChannelEqInstance(const std::string& outputId, std::size_t channelIndex,
                                const std::string& eqInstanceId);
 
@@ -360,6 +363,15 @@ private:
     eqcore::EqInstanceConfig& channelEqInstanceLocked(RouteEntry& entry, std::size_t channelIndex);
     // Copies the lowest-index member's gain/mute/sends onto the rest.
     void adoptGroupLeaderLocked(RouteEntry& entry, const std::vector<uint32_t>& channelIndices);
+    // Points every member at the lowest-index member's EQ instance, so a linked
+    // group shares one curve rather than copies that can drift apart.
+    void shareGroupEqLocked(RouteEntry& entry, const std::vector<uint32_t>& channelIndices);
+    // The inverse: gives each member its own copy, so unlinking really does
+    // separate them.
+    void splitGroupEqLocked(RouteEntry& entry, const std::vector<uint32_t>& channelIndices);
+    // Drops instances no channel references. Assignment isn't user-controllable,
+    // so an unreferenced instance is unreachable rather than a saved preset.
+    void pruneUnreferencedEqLocked(RouteEntry& entry);
     // The distinct inputs any channel of this output sends from, which is what
     // the per-output send pool (kMaxInputs) actually bounds.
     std::set<std::string> routedInputsLocked(const RouteEntry& entry) const;

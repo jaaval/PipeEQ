@@ -10,9 +10,12 @@
 namespace pipeeq {
 
 // Draws the combined frequency response of a set of EqBands on a log-frequency
-// x-axis, with draggable control points (drag = freq/gain, wheel = Q). Uses
-// eqcore::eqResponseCurveDb directly - the same math the daemon applies - so
-// the curve always matches what is actually being computed for those bands.
+// axis, with draggable control points.
+//
+// Uses eqcore::eqResponseCurveDb - the same math the daemon applies - so the
+// curve is always the curve actually being computed for those bands. That is the
+// widget's entire reason to exist, and why a charting library would be a
+// regression rather than a shortcut.
 class EqCurveWidget : public QWidget {
     Q_OBJECT
 
@@ -34,15 +37,27 @@ public:
     // isn't the one being applied.
     void setSampleRateHz(double sampleRateHz);
 
+    // Greys everything out and stops accepting edits, for a bypassed EQ.
+    void setBypassed(bool bypassed);
+
+    int selectedBand() const { return selectedIndex_; }
+    void setSelectedBand(int index);
+
 signals:
-    // Emitted while the user drags a point or scrolls on it. The caller is
-    // expected to push this to the daemon and update any other UI (e.g. a
-    // numeric band table) that mirrors band state.
+    // Emitted while the user drags a point or scrolls on it. The caller pushes
+    // this to the store, which coalesces the writes.
     void bandEdited(int index, eqcore::EqBand band);
     // Bracket the drag, so the store can hold off daemon values for that band
     // and flush the final value on release.
     void bandEditBegan(int index);
     void bandEditFinished(int index);
+
+    void selectedBandChanged(int index);
+    // Double-click on empty plot area: add a band centred there.
+    void bandAddRequested(double freqHz, double gainDb);
+    void bandRemoveRequested(int index);
+    void bandTypeChangeRequested(int index, eqcore::FilterType type);
+
     // Preview mode only: the widget was clicked.
     void activated();
 
@@ -51,7 +66,10 @@ protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void contextMenuEvent(QContextMenuEvent* event) override;
 
 private:
     QRectF plotRect() const;
@@ -60,6 +78,7 @@ private:
     double gainToY(double gainDb) const;
     double yToGain(double y) const;
     int hitTestBand(QPointF pos) const;
+    void drawHandle(QPainter& painter, const eqcore::EqBand& band, int index, bool selected) const;
 
     static constexpr double kMinFreqHz = 20.0;
     static constexpr double kMaxFreqHz = 20000.0;
@@ -68,9 +87,11 @@ private:
 
     std::vector<eqcore::EqBand> bands_;
     int draggingIndex_ = -1;
+    int selectedIndex_ = -1;
     bool preview_ = false;
+    bool bypassed_ = false;
     // Preview gets a tighter vertical range: most curves are within +/-18 dB,
-    // and at 48 px tall the extra headroom just flattens everything.
+    // and at preview height the extra headroom just flattens everything.
     double maxGainDb_ = 24.0;
     double sampleRateHz_ = kDefaultSampleRateHz;
 };

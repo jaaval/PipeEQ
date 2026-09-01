@@ -384,7 +384,10 @@ void FakeBackend::emitMeters() {
             const double slow = std::sin(meterPhase_ * 1.7 + static_cast<double>(i) * 0.9);
             const double fast = std::sin(meterPhase_ * 6.1 + static_cast<double>(i) * 2.3);
             const double normalized = 0.55 + 0.30 * slow + 0.12 * fast;
-            const double peakDb = -42.0 + 45.0 * std::clamp(normalized, 0.0, 1.0);
+            // Peaks at about -3 dBFS rather than above 0: the demo should look
+            // like healthy programme material, not like something permanently
+            // clipping, or the clip indicator conveys nothing.
+            const double peakDb = -40.0 + 37.0 * std::clamp(normalized, 0.0, 1.0);
             meter.peaksDb.push_back(peakDb + channel.gainDb * 0.5);
         }
         outputMeters.push_back(std::move(meter));

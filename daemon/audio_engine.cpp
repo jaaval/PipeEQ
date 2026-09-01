@@ -956,8 +956,87 @@ eqcore::EqInstanceConfig& AudioEngine::channelEqInstanceLocked(RouteEntry& entry
     instance.displayName = channel.position.empty() ? instance.id : channel.position;
     entry.desired.eqInstances.push_back(std::move(instance));
     eqcore::EqInstanceConfig& added = entry.desired.eqInstances.back();
-    channel.eqInstanceId = added.id;
+
+    // Assign it to the whole link group, not just this channel. Linked channels
+    // share one curve, so creating an EQ by editing one member of a pair has to
+    // give the pair one instance - otherwise the first edit would silently
+    // unshare them.
+    for (std::size_t index : entry.desired.linkedChannels(channelIndex)) {
+        entry.desired.channels[index].eqInstanceId = added.id;
+    }
     return added;
+}
+
+// Drops instances no channel references any more.
+//
+// Assignment is not user-controllable, so an unreferenced instance is
+// unreachable rather than a saved preset - it is garbage, and left alone it
+// accumulates every time a group is formed. Only called from the link
+// operations that can orphan one; deliberately NOT done on config load, because
+// loading a file should not delete things from it.
+void AudioEngine::pruneUnreferencedEqLocked(RouteEntry& entry) {
+    auto& instances = entry.desired.eqInstances;
+    instances.erase(std::remove_if(instances.begin(), instances.end(),
+                                    [&](const eqcore::EqInstanceConfig& instance) {
+                                        return std::none_of(
+                                            entry.desired.channels.begin(),
+                                            entry.desired.channels.end(),
+                                            [&](const eqcore::OutputChannelConfig& channel) {
+                                                return channel.eqInstanceId == instance.id;
+                                            });
+                                    }),
+                     instances.end());
+}
+
+// Linked channels share ONE instance: the lowest-index member's.
+//
+// Consistent with gain, mute and sends, which the group also adopts from that
+// member - so linking is never ambiguous about which side wins. A member's own
+// previous curve is discarded, which is why the UI says so before linking.
+void AudioEngine::shareGroupEqLocked(RouteEntry& entry, const std::vector<uint32_t>& members) {
+    if (members.empty()) {
+        return;
+    }
+    const std::size_t leader = *std::min_element(members.begin(), members.end());
+    if (leader >= entry.desired.channels.size()) {
+        return;
+    }
+    const std::string leaderEqId = entry.desired.channels[leader].eqInstanceId;
+    for (uint32_t index : members) {
+        if (index < entry.desired.channels.size()) {
+            entry.desired.channels[index].eqInstanceId = leaderEqId;
+        }
+    }
+    pruneUnreferencedEqLocked(entry);
+}
+
+// Unlinking gives each former member its own COPY of the shared curve.
+//
+// Without this, "unlink" would separate the faders but leave the channels still
+// sharing one EQ, so editing one would still change the other - which is not
+// what unlinking means.
+void AudioEngine::splitGroupEqLocked(RouteEntry& entry, const std::vector<uint32_t>& members) {
+    if (members.size() < 2) {
+        return;
+    }
+    const std::size_t leader = *std::min_element(members.begin(), members.end());
+    for (uint32_t index : members) {
+        if (index >= entry.desired.channels.size() || index == leader) {
+            continue;
+        }
+        eqcore::OutputChannelConfig& channel = entry.desired.channels[index];
+        const eqcore::EqInstanceConfig* shared = entry.desired.findEqInstance(channel.eqInstanceId);
+        if (!shared) {
+            continue;
+        }
+        eqcore::EqInstanceConfig copy = *shared;
+        copy.id = entry.desired.nextEqInstanceId();
+        if (!channel.position.empty()) {
+            copy.displayName = channel.position;
+        }
+        entry.desired.eqInstances.push_back(std::move(copy));
+        channel.eqInstanceId = entry.desired.eqInstances.back().id;
+    }
 }
 
 std::vector<eqcore::EqBand> AudioEngine::getChannelEqBands(const std::string& outputId,
@@ -1080,6 +1159,7 @@ std::string AudioEngine::createLinkGroup(const std::string& outputId,
     entry->desired.linkGroups.push_back(std::move(group));
 
     adoptGroupLeaderLocked(*entry, members);
+    shareGroupEqLocked(*entry, members);
     republishLocked(*entry);
     return entry->desired.linkGroups.back().id;
 }
@@ -1096,9 +1176,14 @@ bool AudioEngine::removeLinkGroup(const std::string& outputId, const std::string
     if (it == groups.end()) {
         return false;
     }
-    // Unlinking keeps every channel's current values; they simply stop moving
-    // together from now on.
+    // Unlinking keeps every channel's current gain, mute and sends; they simply
+    // stop moving together from now on. The shared EQ has to be split into
+    // per-channel copies, though, or the channels would keep sharing one curve
+    // and editing either would still change both.
+    const std::vector<uint32_t> members = it->channelIndices;
     groups.erase(it);
+    splitGroupEqLocked(*entry, members);
+    republishLocked(*entry);
     return true;
 }
 
@@ -1130,8 +1215,24 @@ bool AudioEngine::setLinkGroupChannels(const std::string& outputId, const std::s
         }
     }
 
+    const std::vector<uint32_t> previousMembers = group->channelIndices;
     group->channelIndices = members;
+    // Anything dropped from the group gets its own copy of the curve; whatever
+    // remains shares the leader's.
+    std::vector<uint32_t> removed;
+    for (uint32_t index : previousMembers) {
+        if (std::find(members.begin(), members.end(), index) == members.end()) {
+            removed.push_back(index);
+        }
+    }
+    if (!removed.empty()) {
+        std::vector<uint32_t> splitSet = removed;
+        splitSet.push_back(*std::min_element(previousMembers.begin(), previousMembers.end()));
+        std::sort(splitSet.begin(), splitSet.end());
+        splitGroupEqLocked(*entry, splitSet);
+    }
     adoptGroupLeaderLocked(*entry, members);
+    shareGroupEqLocked(*entry, members);
     republishLocked(*entry);
     return true;
 }

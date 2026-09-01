@@ -13,18 +13,21 @@ OUT="${OUT:-/tmp/pipeeq_gui.png}"
 GEOMETRY="${GEOMETRY:-1100x700}"
 ONSCREEN=0
 DEMO=0
+OPEN_EQ=0
 SEED_CONFIG="${SEED_CONFIG:-}"
 
 for arg in "$@"; do
     case "$arg" in
         --onscreen) ONSCREEN=1 ;;
         --demo) DEMO=1 ;;
+        --open-eq) OPEN_EQ=1 ;;
         *) echo "unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
 
 GUI_ARGS=""
-[[ "$DEMO" -eq 1 ]] && GUI_ARGS="--demo"
+[[ "$DEMO" -eq 1 ]] && GUI_ARGS="$GUI_ARGS --demo"
+[[ "$OPEN_EQ" -eq 1 ]] && GUI_ARGS="$GUI_ARGS --open-eq"
 
 WORKDIR="$(mktemp -d)"
 export XDG_CONFIG_HOME="$WORKDIR/config"
@@ -90,7 +93,7 @@ else
             '$BUILD_DIR/gui/pipeeq-gui' $GUI_ARGS --geometry '$GEOMETRY' \
             > '$WORKDIR/gui-inner.log' 2>&1 &
         GUI=\$!
-        sleep 3
+        sleep 4
         import -window root '$OUT'
         kill \$GUI 2>/dev/null
     " > "$WORKDIR/gui.log" 2>&1
