@@ -354,6 +354,122 @@ bool FakeBackend::removeSend(const QString& outputId, uint32_t channelIndex,
 
 // ------------------------------------------------------------------ metering --
 
+void FakeBackend::adoptLeader(Output& output, const std::vector<uint32_t>& members) {
+    if (members.empty()) {
+        return;
+    }
+    const std::size_t leader = *std::min_element(members.begin(), members.end());
+    if (leader >= output.channels.size()) {
+        return;
+    }
+    const Channel source = output.channels[leader];
+    for (uint32_t index : members) {
+        if (index >= output.channels.size() || index == leader) {
+            continue;
+        }
+        Channel& target = output.channels[index];
+        target.gainDb = source.gainDb;
+        target.muted = source.muted;
+        target.sendsDb = source.sendsDb;
+        // Sharing the curve is what linking means; a copy here stands in for the
+        // daemon's shared instance.
+        target.bands = source.bands;
+    }
+}
+
+void FakeBackend::splitEq(Output& output, const std::vector<uint32_t>& members) {
+    // The fake stores bands per channel, so they are already separate copies -
+    // nothing to do beyond making the intent explicit. The real daemon has to
+    // clone a shared instance here.
+    Q_UNUSED(output);
+    Q_UNUSED(members);
+}
+
+QString FakeBackend::createLinkGroup(const QString& outputId, const QVector<uint32_t>& channels,
+                                      const QString& displayName) {
+    Output* output = findOutput(outputId);
+    if (!output) {
+        return {};
+    }
+
+    std::vector<uint32_t> members(channels.begin(), channels.end());
+    std::sort(members.begin(), members.end());
+    members.erase(std::unique(members.begin(), members.end()), members.end());
+    if (members.size() < 2) {
+        return {};
+    }
+    for (uint32_t index : members) {
+        if (index >= output->channels.size() || !output->channels[index].groupId.isEmpty()) {
+            return {}; // out of range, or already in another group
+        }
+    }
+
+    const QString groupId = QString("group-%1").arg(nextGroupIndex_++);
+    for (uint32_t index : members) {
+        output->channels[index].groupId = groupId;
+    }
+    adoptLeader(*output, members);
+    Q_UNUSED(displayName);
+    emit outputChanged(outputId);
+    return groupId;
+}
+
+bool FakeBackend::removeLinkGroup(const QString& outputId, const QString& groupId) {
+    Output* output = findOutput(outputId);
+    if (!output) {
+        return false;
+    }
+    std::vector<uint32_t> members;
+    for (std::size_t i = 0; i < output->channels.size(); ++i) {
+        if (output->channels[i].groupId == groupId) {
+            members.push_back(static_cast<uint32_t>(i));
+        }
+    }
+    if (members.empty()) {
+        return false;
+    }
+    for (uint32_t index : members) {
+        output->channels[index].groupId.clear();
+    }
+    splitEq(*output, members);
+    emit outputChanged(outputId);
+    return true;
+}
+
+bool FakeBackend::setLinkGroupChannels(const QString& outputId, const QString& groupId,
+                                        const QVector<uint32_t>& channels) {
+    Output* output = findOutput(outputId);
+    if (!output) {
+        return false;
+    }
+    std::vector<uint32_t> members(channels.begin(), channels.end());
+    std::sort(members.begin(), members.end());
+    members.erase(std::unique(members.begin(), members.end()), members.end());
+    if (members.size() < 2) {
+        return false;
+    }
+    for (uint32_t index : members) {
+        if (index >= output->channels.size()) {
+            return false;
+        }
+        const QString owner = output->channels[index].groupId;
+        if (!owner.isEmpty() && owner != groupId) {
+            return false;
+        }
+    }
+    for (Channel& channel : output->channels) {
+        if (channel.groupId == groupId) {
+            channel.groupId.clear();
+        }
+    }
+    for (uint32_t index : members) {
+        output->channels[index].groupId = groupId;
+    }
+    adoptLeader(*output, members);
+    emit outputChanged(outputId);
+    return true;
+}
+
 void FakeBackend::setMeteringEnabled(bool enabled) {
     if (enabled) {
         meterTimer_.start();

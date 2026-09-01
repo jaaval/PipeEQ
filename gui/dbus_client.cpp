@@ -95,6 +95,62 @@ DbusClient::DbusClient(QObject* parent) : Backend(parent) {
         });
 }
 
+QString DbusClient::createLinkGroup(const QString& outputId, const QVector<uint32_t>& channels,
+                                     const QString& displayName) {
+    if (!proxy_) {
+        return {};
+    }
+    try {
+        std::string groupId;
+        proxy_->callMethod(eqcore::dbus::kMethodCreateLinkGroup)
+            .onInterface(eqcore::dbus::kInterfaceName)
+            .withArguments(outputId.toStdString(),
+                            std::vector<uint32_t>(channels.begin(), channels.end()),
+                            displayName.toStdString())
+            .storeResultsTo(groupId);
+        return QString::fromStdString(groupId);
+    } catch (const sdbus::Error& e) {
+        qWarning("pipeeq-gui: CreateLinkGroup failed: %s", e.what());
+        return {};
+    }
+}
+
+bool DbusClient::removeLinkGroup(const QString& outputId, const QString& groupId) {
+    if (!proxy_) {
+        return false;
+    }
+    try {
+        bool ok = false;
+        proxy_->callMethod(eqcore::dbus::kMethodRemoveLinkGroup)
+            .onInterface(eqcore::dbus::kInterfaceName)
+            .withArguments(outputId.toStdString(), groupId.toStdString())
+            .storeResultsTo(ok);
+        return ok;
+    } catch (const sdbus::Error& e) {
+        qWarning("pipeeq-gui: RemoveLinkGroup failed: %s", e.what());
+        return false;
+    }
+}
+
+bool DbusClient::setLinkGroupChannels(const QString& outputId, const QString& groupId,
+                                       const QVector<uint32_t>& channels) {
+    if (!proxy_) {
+        return false;
+    }
+    try {
+        bool ok = false;
+        proxy_->callMethod(eqcore::dbus::kMethodSetLinkGroupChannels)
+            .onInterface(eqcore::dbus::kInterfaceName)
+            .withArguments(outputId.toStdString(), groupId.toStdString(),
+                            std::vector<uint32_t>(channels.begin(), channels.end()))
+            .storeResultsTo(ok);
+        return ok;
+    } catch (const sdbus::Error& e) {
+        qWarning("pipeeq-gui: SetLinkGroupChannels failed: %s", e.what());
+        return false;
+    }
+}
+
 void DbusClient::setMeteringEnabled(bool enabled) {
     if (!proxy_) {
         return;

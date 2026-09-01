@@ -133,6 +133,24 @@ public:
     // nothing. The daemon refuses past this.
     virtual int maxSendsPerOutput() const = 0;
 
+    // ---- link groups ----
+    //
+    // Linking is what makes channels share a fader, a mute, their sends AND
+    // their EQ curve; there is no separate EQ assignment step. The group adopts
+    // the LOWEST-INDEX member's values, so linking is never ambiguous about
+    // which side wins - and the other members' previous settings are discarded,
+    // which is why the UI says so first.
+    //
+    // Returns the new group id, or empty on failure (fewer than two channels, or
+    // a channel already in another group).
+    virtual QString createLinkGroup(const QString& outputId, const QVector<uint32_t>& channels,
+                                     const QString& displayName) = 0;
+    // Unlinking keeps every channel's current values and gives each its own copy
+    // of the shared curve, so it really does separate them.
+    virtual bool removeLinkGroup(const QString& outputId, const QString& groupId) = 0;
+    virtual bool setLinkGroupChannels(const QString& outputId, const QString& groupId,
+                                       const QVector<uint32_t>& channels) = 0;
+
     // Arms or disarms level reporting. The daemon's lease expires on its own,
     // so a watcher re-arms periodically rather than relying on a clean
     // shutdown.

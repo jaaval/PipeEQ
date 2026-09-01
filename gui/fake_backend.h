@@ -58,6 +58,12 @@ public:
     QVector<SendEntry> getOutputSends(const QString& outputId) override;
     int maxSendsPerOutput() const override { return 8; }
 
+    QString createLinkGroup(const QString& outputId, const QVector<uint32_t>& channels,
+                             const QString& displayName) override;
+    bool removeLinkGroup(const QString& outputId, const QString& groupId) override;
+    bool setLinkGroupChannels(const QString& outputId, const QString& groupId,
+                               const QVector<uint32_t>& channels) override;
+
     void setMeteringEnabled(bool enabled) override;
 
 private:
@@ -85,11 +91,20 @@ private:
     std::vector<Channel*> linkedChannels(const QString& outputId, uint32_t channelIndex);
     void emitMeters();
 
+    // Mirrors the daemon: linking adopts the lowest-index member's values and
+    // shares its curve; unlinking gives each member its own copy. Duplicated
+    // rather than shared because this backend has no daemon behind it - but the
+    // semantics have to match, or UI built against the fake would be wrong
+    // against the real thing.
+    void adoptLeader(Output& output, const std::vector<uint32_t>& members);
+    void splitEq(Output& output, const std::vector<uint32_t>& members);
+
     std::vector<DeviceRow> devices_;
     std::vector<Output> outputs_;
     std::vector<InputRow> inputs_;
     int nextOutputIndex_ = 1;
     int nextInputIndex_ = 1;
+    int nextGroupIndex_ = 3; // group-1 and group-2 exist in the seeded topology
 
     QTimer meterTimer_;
     double meterPhase_ = 0.0;

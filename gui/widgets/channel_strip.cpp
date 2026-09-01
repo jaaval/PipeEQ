@@ -125,6 +125,22 @@ void ChannelStrip::setSelected(bool selected) {
     update();
 }
 
+void ChannelStrip::setMarkedForLink(bool marked) {
+    if (markedForLink_ == marked) {
+        return;
+    }
+    markedForLink_ = marked;
+    update();
+}
+
+void ChannelStrip::setLinkDropTarget(bool target) {
+    if (linkDropTarget_ == target) {
+        return;
+    }
+    linkDropTarget_ = target;
+    update();
+}
+
 double ChannelStrip::gainDb() const {
     if (hasPendingGain_) {
         return pendingGainDb_;
@@ -274,7 +290,22 @@ void ChannelStrip::paintEvent(QPaintEvent* event) {
     painter.setBrush(background);
     painter.drawRoundedRect(rect().adjusted(1, 1, -1, -1), tokens.radius, tokens.radius);
 
-    painter.setPen(QPen(selected_ ? tokens.accent : tokens.border, selected_ ? 2 : 1));
+    // Three distinct outlines, in priority order: a live link drop target, a
+    // strip marked for linking, then the primary selection. They have to be
+    // told apart at a glance or a multi-select is impossible to follow.
+    QColor outline = tokens.border;
+    int outlineWidth = 1;
+    if (linkDropTarget_) {
+        outline = tokens.linkActive;
+        outlineWidth = 3;
+    } else if (markedForLink_) {
+        outline = tokens.linkActive;
+        outlineWidth = 2;
+    } else if (selected_) {
+        outline = tokens.accent;
+        outlineWidth = 2;
+    }
+    painter.setPen(QPen(outline, outlineWidth));
     painter.setBrush(Qt::NoBrush);
     painter.drawRoundedRect(rect().adjusted(1, 1, -2, -2), tokens.radius, tokens.radius);
 
@@ -386,13 +417,22 @@ void ChannelStrip::mousePressEvent(QMouseEvent* event) {
         return;
     }
     if (layout_.link.contains(pos)) {
-        // Grabbing the link badge, never the strip body: the body selects, and
-        // grabbing the fader must never link.
-        emit linkToggleRequested();
+        // The badge is the only link affordance: the strip body selects, and
+        // grabbing the fader must never link. A press here starts a possible
+        // drag; a release without movement is treated as a click.
+        draggingLink_ = true;
+        emit linkDragStarted();
         return;
     }
     if (layout_.positionBadge.contains(pos)) {
         emit positionClicked();
+        return;
+    }
+
+    if (event->modifiers() & Qt::ControlModifier) {
+        // Keyboard/accessibility parity for drag-to-link, and the only way to
+        // link non-adjacent channels comfortably.
+        emit linkSelectionToggled();
         return;
     }
 
@@ -408,6 +448,10 @@ void ChannelStrip::mousePressEvent(QMouseEvent* event) {
 }
 
 void ChannelStrip::mouseMoveEvent(QMouseEvent* event) {
+    if (draggingLink_) {
+        emit linkDragMoved(event->globalPosition().toPoint());
+        return;
+    }
     if (!draggingFader_) {
         return;
     }
@@ -430,7 +474,11 @@ void ChannelStrip::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void ChannelStrip::mouseReleaseEvent(QMouseEvent* event) {
-    Q_UNUSED(event);
+    if (draggingLink_) {
+        draggingLink_ = false;
+        emit linkDragFinished(event->globalPosition().toPoint());
+        return;
+    }
     if (!draggingFader_) {
         return;
     }

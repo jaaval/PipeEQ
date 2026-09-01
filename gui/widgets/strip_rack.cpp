@@ -8,6 +8,9 @@
 #include <QScrollBar>
 #include <QVBoxLayout>
 
+#include <QApplication>
+#include <QMessageBox>
+
 #include "channel_strip.h"
 #include "model/app_state.h"
 #include "theme/theme.h"
@@ -76,6 +79,139 @@ QVector<StripRack::StripCluster> StripRack::buildClusters() const {
     return clusters;
 }
 
+// Resolves a screen position to the strip under it, ignoring the one being
+// dragged from. Done by geometry rather than by Qt's drag-and-drop because the
+// gesture is a press-drag-release on one custom widget, not a data transfer.
+ChannelStrip* StripRack::stripAtGlobalPos(const QPoint& globalPos) const {
+    for (auto it = stripWidgets_.begin(); it != stripWidgets_.end(); ++it) {
+        ChannelStrip* strip = it.value();
+        if (!strip->isVisible()) {
+            continue;
+        }
+        const QRect global(strip->mapToGlobal(QPoint(0, 0)), strip->size());
+        if (global.contains(globalPos)) {
+            return strip;
+        }
+    }
+    return nullptr;
+}
+
+void StripRack::applyLinkMarks() {
+    for (auto it = stripWidgets_.begin(); it != stripWidgets_.end(); ++it) {
+        it.value()->setMarkedForLink(linkMarks_.contains(it.key()));
+    }
+}
+
+void StripRack::toggleLinkMark(ChannelStrip* strip) {
+    const QString key = stripWidgets_.key(strip);
+    if (key.isEmpty()) {
+        return;
+    }
+    if (strip->strips().size() > 1) {
+        emit statusMessage("That strip is already a linked group. Click its link badge to unlink.");
+        return;
+    }
+    if (linkMarks_.contains(key)) {
+        linkMarks_.remove(key);
+    } else {
+        linkMarks_.insert(key);
+    }
+    applyLinkMarks();
+    emit statusMessage(linkMarks_.isEmpty()
+                            ? QString()
+                            : QString("%1 channel(s) marked - press L or click a link badge to link "
+                                      "them.")
+                                  .arg(linkMarks_.size()));
+}
+
+bool StripRack::linkChannels(ChannelStrip* anchor, const QVector<ChannelStrip*>& others) {
+    if (!anchor || others.isEmpty()) {
+        return false;
+    }
+
+    QVector<ChannelStrip*> all = others;
+    all.push_back(anchor);
+
+    const QString outputId = anchor->outputId();
+    QVector<uint32_t> indices;
+    for (ChannelStrip* strip : all) {
+        // A group is per output: the daemon's link groups index into one
+        // output's channel list, and two devices have no shared fader anyway.
+        if (strip->outputId() != outputId) {
+            emit statusMessage("Channels can only be linked within one output device.");
+            return false;
+        }
+        if (strip->strips().size() > 1) {
+            emit statusMessage("One of those strips is already a linked group; unlink it first.");
+            return false;
+        }
+        indices.push_back(strip->primaryChannelIndex());
+    }
+    std::sort(indices.begin(), indices.end());
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+    if (indices.size() < 2) {
+        return false;
+    }
+
+    // Linking DISCARDS the non-leader channels' gain, mute, sends and EQ,
+    // because the group adopts the lowest-index member's. That is not
+    // recoverable by unlinking, so it gets confirmed rather than just done.
+    const uint32_t leaderIndex = indices.front();
+    QString leaderName;
+    QStringList discarded;
+    for (ChannelStrip* strip : all) {
+        const StripRow& row = strip->strips().front();
+        const QString name = row.channelName.isEmpty() ? row.position : row.channelName;
+        if (row.channelIndex == leaderIndex) {
+            leaderName = name;
+        } else {
+            discarded << name;
+        }
+    }
+
+    const auto answer = QMessageBox::question(
+        this, "Link channels",
+        QString("Link %1 and %2?\n\nThey will share one fader, mute, set of sends and EQ curve, "
+                "taken from %1. The current settings of %2 will be replaced.")
+            .arg(leaderName, discarded.join(", ")),
+        QMessageBox::Ok | QMessageBox::Cancel);
+    if (answer != QMessageBox::Ok) {
+        return false;
+    }
+
+    state_->linkChannels(outputId, indices);
+    linkMarks_.clear();
+    applyLinkMarks();
+    emit statusMessage(QString("Linked %1 and %2.").arg(leaderName, discarded.join(", ")));
+    return true;
+}
+
+void StripRack::linkMarkedChannels() {
+    QVector<ChannelStrip*> marked;
+    for (const QString& key : linkMarks_) {
+        if (ChannelStrip* strip = stripWidgets_.value(key, nullptr)) {
+            marked.push_back(strip);
+        }
+    }
+    if (marked.size() < 2) {
+        emit statusMessage("Ctrl+click two or more channels of the same output, then press L.");
+        return;
+    }
+    // Lowest channel index is the anchor, matching the daemon's leader rule.
+    std::sort(marked.begin(), marked.end(), [](ChannelStrip* a, ChannelStrip* b) {
+        return a->primaryChannelIndex() < b->primaryChannelIndex();
+    });
+    ChannelStrip* anchor = marked.front();
+    marked.removeFirst();
+    linkChannels(anchor, marked);
+}
+
+void StripRack::clearLinkMarks() {
+    linkMarks_.clear();
+    applyLinkMarks();
+    emit statusMessage(QString());
+}
+
 void StripRack::connectStrip(ChannelStrip* strip) {
     connect(strip, &ChannelStrip::selectRequested, this, [this, strip] {
         setSelectedStripId(strip->primaryId());
@@ -95,8 +231,67 @@ void StripRack::connectStrip(ChannelStrip* strip) {
     });
     connect(strip, &ChannelStrip::positionClicked, this,
             [this, strip] { emit positionClicked(strip->primaryId()); });
-    connect(strip, &ChannelStrip::linkToggleRequested, this,
-            [this, strip] { emit linkToggleRequested(strip->primaryId()); });
+
+    connect(strip, &ChannelStrip::linkSelectionToggled, this,
+            [this, strip] { toggleLinkMark(strip); });
+
+    connect(strip, &ChannelStrip::linkDragStarted, this, [this, strip] {
+        linkDragSource_ = strip;
+        linkDropTarget_ = nullptr;
+    });
+    connect(strip, &ChannelStrip::linkDragMoved, this, [this](const QPoint& globalPos) {
+        ChannelStrip* target = stripAtGlobalPos(globalPos);
+        if (target == linkDragSource_) {
+            target = nullptr;
+        }
+        if (target == linkDropTarget_) {
+            return;
+        }
+        if (linkDropTarget_) {
+            linkDropTarget_->setLinkDropTarget(false);
+        }
+        linkDropTarget_ = target;
+        if (linkDropTarget_) {
+            linkDropTarget_->setLinkDropTarget(true);
+        }
+    });
+    connect(strip, &ChannelStrip::linkDragFinished, this, [this, strip](const QPoint& globalPos) {
+        ChannelStrip* target = stripAtGlobalPos(globalPos);
+        if (linkDropTarget_) {
+            linkDropTarget_->setLinkDropTarget(false);
+            linkDropTarget_ = nullptr;
+        }
+        linkDragSource_ = nullptr;
+
+        if (target && target != strip) {
+            // Dragged onto another strip: link the two.
+            linkChannels(strip->primaryChannelIndex() <= target->primaryChannelIndex() ? strip
+                                                                                        : target,
+                          {strip->primaryChannelIndex() <= target->primaryChannelIndex() ? target
+                                                                                          : strip});
+            return;
+        }
+
+        // Released without moving: a plain click on the badge.
+        const QVector<StripRow>& members = strip->strips();
+        if (members.size() > 1) {
+            // Unlinking is trivially reversible, so it needs no confirmation.
+            state_->unlinkGroup(members.front().outputId, members.front().groupId);
+            emit statusMessage("Unlinked. Each channel keeps its current settings and its own copy "
+                                "of the EQ curve.");
+            return;
+        }
+        // Badge clicks build a selection and then link it. Clicking an
+        // already-marked strip just unmarks it - it must NOT then try to link,
+        // which would attempt it with one fewer channel than the user has
+        // marked and complain that there aren't enough.
+        const QString key = stripWidgets_.key(strip);
+        const bool wasMarked = linkMarks_.contains(key);
+        toggleLinkMark(strip);
+        if (!wasMarked && markedCount() >= 2) {
+            linkMarkedChannels();
+        }
+    });
 }
 
 void StripRack::rebuild() {
@@ -198,6 +393,13 @@ void StripRack::rebuild() {
         }
     }
     stripWidgets_ = kept;
+    // Marks are keyed by cluster, so drop any whose cluster no longer exists.
+    for (const QString& key : linkMarks_.values()) {
+        if (!stripWidgets_.contains(key)) {
+            linkMarks_.remove(key);
+        }
+    }
+    applyLinkMarks();
 
     // Keep a valid selection so the detail area is never left showing nothing.
     if (!selectedStripId_.isEmpty() && !state_->findStrip(selectedStripId_)) {

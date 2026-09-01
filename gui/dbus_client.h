@@ -63,6 +63,12 @@ public:
     QVector<SendEntry> getOutputSends(const QString& outputId) override;
     int maxSendsPerOutput() const override { return kMaxSendsPerOutput; }
 
+    QString createLinkGroup(const QString& outputId, const QVector<uint32_t>& channels,
+                             const QString& displayName) override;
+    bool removeLinkGroup(const QString& outputId, const QString& groupId) override;
+    bool setLinkGroupChannels(const QString& outputId, const QString& groupId,
+                               const QVector<uint32_t>& channels) override;
+
     void setMeteringEnabled(bool enabled) override;
 
 private:

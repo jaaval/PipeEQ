@@ -157,4 +157,32 @@ void BackendWorker::removeInput(const QString& inputId) {
     requestSnapshot();
 }
 
+void BackendWorker::createLinkGroup(const QString& outputId, const QVector<uint32_t>& channels) {
+    if (!backend_) {
+        return;
+    }
+    backend_->createLinkGroup(outputId, channels, QString());
+    requestSnapshot();
+    requestOutputSends(outputId);
+}
+
+void BackendWorker::removeLinkGroup(const QString& outputId, const QString& groupId) {
+    if (!backend_) {
+        return;
+    }
+    backend_->removeLinkGroup(outputId, groupId);
+    requestSnapshot();
+    requestOutputSends(outputId);
+}
+
+void BackendWorker::setLinkGroupChannels(const QString& outputId, const QString& groupId,
+                                          const QVector<uint32_t>& channels) {
+    if (!backend_) {
+        return;
+    }
+    backend_->setLinkGroupChannels(outputId, groupId, channels);
+    requestSnapshot();
+    requestOutputSends(outputId);
+}
+
 } // namespace pipeeq

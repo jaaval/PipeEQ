@@ -13,6 +13,7 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QShortcut>
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QVBoxLayout>
@@ -82,13 +83,25 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
         selectStrip(stripId);
         detailStack_->setCurrentIndex(0);
     });
-    connect(stripRack_, &StripRack::linkToggleRequested, this, [this](const QString&) {
-        statusLabel_->setText("Linking and unlinking arrive with the grouping work.");
+    connect(stripRack_, &StripRack::statusMessage, this, [this](const QString& message) {
+        // The rack's own progress and refusals go to the status bar; an empty
+        // message means "nothing to say", so fall back to the selection.
+        if (message.isEmpty()) {
+            updateStripStatus();
+        } else {
+            statusLabel_->setText(message);
+        }
     });
     rootLayout->addWidget(stripRack_);
 
     setCentralWidget(central);
     applyDetailSizing(0);
+
+    // Window-level shortcuts, so linking works wherever focus happens to be.
+    auto* linkShortcut = new QShortcut(QKeySequence(Qt::Key_L), this);
+    connect(linkShortcut, &QShortcut::activated, stripRack_, &StripRack::linkMarkedChannels);
+    auto* clearShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), this);
+    connect(clearShortcut, &QShortcut::activated, stripRack_, &StripRack::clearLinkMarks);
 
     statusLabel_ = new QLabel(this);
     statusBar()->addWidget(statusLabel_);

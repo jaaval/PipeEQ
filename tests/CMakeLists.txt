@@ -56,6 +56,7 @@ if(TARGET pipeeq-gui)
         ${CMAKE_SOURCE_DIR}/gui/model/edit_guard.cpp
         ${CMAKE_SOURCE_DIR}/gui/model/level_meters.cpp
         ${CMAKE_SOURCE_DIR}/gui/model/write_coalescer.cpp
+        ${CMAKE_SOURCE_DIR}/gui/fake_backend.cpp
         ${CMAKE_SOURCE_DIR}/gui/widgets/fader_taper.cpp
     )
     target_include_directories(test_gui_model PRIVATE ${CMAKE_SOURCE_DIR}/gui)

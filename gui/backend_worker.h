@@ -45,6 +45,10 @@ public slots:
     void removeOutput(const QString& outputId);
     void addInput(const QString& displayName);
     void removeInput(const QString& inputId);
+    void createLinkGroup(const QString& outputId, const QVector<uint32_t>& channels);
+    void removeLinkGroup(const QString& outputId, const QString& groupId);
+    void setLinkGroupChannels(const QString& outputId, const QString& groupId,
+                               const QVector<uint32_t>& channels);
 
 signals:
     void snapshotReady(const DaemonSnapshot& snapshot);

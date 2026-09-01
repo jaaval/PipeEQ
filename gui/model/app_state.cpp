@@ -27,6 +27,7 @@ AppState::AppState(bool demo, QObject* parent) : QObject(parent) {
     qRegisterMetaType<QVector<QPair<QString, double>>>("QVector<QPair<QString,double>>");
     qRegisterMetaType<SendEntry>();
     qRegisterMetaType<QVector<SendEntry>>("QVector<SendEntry>");
+    qRegisterMetaType<QVector<uint32_t>>("QVector<uint32_t>");
 
     worker_ = new BackendWorker(demo);
     worker_->moveToThread(&workerThread_);
@@ -405,6 +406,37 @@ void AppState::addInput(const QString& displayName) {
 void AppState::removeInput(const QString& inputId) {
     QMetaObject::invokeMethod(worker_, "removeInput", Qt::QueuedConnection,
                                Q_ARG(QString, inputId));
+}
+
+void AppState::linkChannels(const QString& outputId, const QVector<uint32_t>& channelIndices) {
+    QMetaObject::invokeMethod(worker_, "createLinkGroup", Qt::QueuedConnection,
+                               Q_ARG(QString, outputId), Q_ARG(QVector<uint32_t>, channelIndices));
+}
+
+void AppState::unlinkGroup(const QString& outputId, const QString& groupId) {
+    QMetaObject::invokeMethod(worker_, "removeLinkGroup", Qt::QueuedConnection,
+                               Q_ARG(QString, outputId), Q_ARG(QString, groupId));
+}
+
+void AppState::setGroupChannels(const QString& outputId, const QString& groupId,
+                                 const QVector<uint32_t>& channelIndices) {
+    QMetaObject::invokeMethod(worker_, "setLinkGroupChannels", Qt::QueuedConnection,
+                               Q_ARG(QString, outputId), Q_ARG(QString, groupId),
+                               Q_ARG(QVector<uint32_t>, channelIndices));
+}
+
+QVector<uint32_t> AppState::groupChannels(const QString& outputId, const QString& groupId) const {
+    QVector<uint32_t> indices;
+    if (groupId.isEmpty()) {
+        return indices;
+    }
+    for (const StripRow& strip : snapshot_.strips) {
+        if (strip.outputId == outputId && strip.groupId == groupId) {
+            indices.push_back(strip.channelIndex);
+        }
+    }
+    std::sort(indices.begin(), indices.end());
+    return indices;
 }
 
 void AppState::setMeteringEnabled(bool enabled) {

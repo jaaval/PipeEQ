@@ -2,6 +2,7 @@
 
 #include <QHash>
 #include <QScrollArea>
+#include <QSet>
 #include <QVector>
 #include <QWidget>
 
@@ -39,10 +40,16 @@ public:
     void setSelectedStripId(const QString& stripId);
     QString selectedStripId() const { return selectedStripId_; }
 
+    // Links whatever is currently marked. Also reachable with the L key.
+    void linkMarkedChannels();
+    void clearLinkMarks();
+    int markedCount() const { return static_cast<int>(linkMarks_.size()); }
+
 signals:
     void selectionChanged(const QString& stripId);
     void positionClicked(const QString& stripId);
-    void linkToggleRequested(const QString& stripId);
+    // Human-readable progress or refusal, for the status bar.
+    void statusMessage(const QString& message);
 
 private:
     // The strips that belong together in one widget: a link group, or one lone
@@ -55,6 +62,11 @@ private:
 
     QVector<StripCluster> buildClusters() const;
     void connectStrip(ChannelStrip* strip);
+    ChannelStrip* stripAtGlobalPos(const QPoint& globalPos) const;
+    void applyLinkMarks();
+    void toggleLinkMark(ChannelStrip* strip);
+    // Asks before discarding, then links. Returns false if it refused.
+    bool linkChannels(ChannelStrip* anchor, const QVector<ChannelStrip*>& others);
 
     AppState* state_;
     QWidget* content_ = nullptr;
@@ -64,6 +76,11 @@ private:
     QHash<QString, ChannelStrip*> stripWidgets_;
     QVector<QWidget*> deviceBlocks_;
     QString selectedStripId_;
+    // Cluster keys marked for linking. Keyed by cluster rather than strip id so
+    // a rebuild doesn't lose the marks.
+    QSet<QString> linkMarks_;
+    ChannelStrip* linkDragSource_ = nullptr;
+    ChannelStrip* linkDropTarget_ = nullptr;
 };
 
 } // namespace pipeeq

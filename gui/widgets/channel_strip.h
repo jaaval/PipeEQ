@@ -41,6 +41,11 @@ public:
 
     void setSelected(bool selected);
     bool isSelected() const { return selected_; }
+    // Part of a multi-selection being assembled for linking. Drawn distinctly
+    // from the primary selection, which drives the detail panel.
+    void setMarkedForLink(bool marked);
+    // Highlighted as the strip a link drag would land on.
+    void setLinkDropTarget(bool target);
     void setAccentColor(const QColor& color) { accent_ = color; update(); }
 
     QSize sizeHint() const override;
@@ -59,8 +64,16 @@ signals:
     void gainEditBegan();
     void gainEditFinished();
     void muteToggled(bool muted);
+    // The link badge was clicked: unlink if this is a group, otherwise toggle
+    // this strip's membership of the pending multi-selection.
     void linkToggleRequested();
     void positionClicked();
+    // Ctrl+click: add or remove this strip from the pending multi-selection.
+    void linkSelectionToggled();
+    // Dragging FROM the link badge. The rack resolves the position to a strip.
+    void linkDragStarted();
+    void linkDragMoved(const QPoint& globalPos);
+    void linkDragFinished(const QPoint& globalPos);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -105,6 +118,9 @@ private:
     QVector<bool> lastDrawnClip_;
     QColor accent_;
     bool selected_ = false;
+    bool markedForLink_ = false;
+    bool linkDropTarget_ = false;
+    bool draggingLink_ = false;
     bool draggingFader_ = false;
     // Local value while dragging, so the strip follows the pointer instead of
     // the round trip. The store's edit guard is what stops a snapshot

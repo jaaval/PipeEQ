@@ -13,6 +13,7 @@
 #include "model/edit_guard.h"
 #include "model/level_meters.h"
 #include "model/write_coalescer.h"
+#include "fake_backend.h"
 #include "widgets/fader_taper.h"
 
 #include "check.h"
@@ -436,6 +437,143 @@ void testTaperResolutionNearUnity() {
     CHECK(dbPerPixel < 0.25);
 }
 
+// ------------------------------------------------- demo backend link semantics --
+
+// The fake backend duplicates the daemon's linking rules, because it has no
+// daemon behind it. Duplicated behaviour drifts, and UI built against a fake
+// that behaves differently from the real thing is worse than no fake at all -
+// so the rules are asserted here rather than assumed.
+
+int channelIndexOf(FakeBackend& backend, const QString& outputId, const QString& position) {
+    for (const StripRow& strip : backend.listStrips()) {
+        if (strip.outputId == outputId && strip.position == position) {
+            return static_cast<int>(strip.channelIndex);
+        }
+    }
+    return -1;
+}
+
+StripRow stripFor(FakeBackend& backend, const QString& outputId, uint32_t channelIndex) {
+    for (const StripRow& strip : backend.listStrips()) {
+        if (strip.outputId == outputId && strip.channelIndex == channelIndex) {
+            return strip;
+        }
+    }
+    return {};
+}
+
+void testDemoLinkAdoptsLeaderValues() {
+    FakeBackend backend;
+    // The seeded 5.1 output has FC and LFE ungrouped, with different gains and
+    // different curves - so linking them is a real test of what gets discarded.
+    const QString outputId = "output-1";
+    const int fc = channelIndexOf(backend, outputId, "FC");
+    const int lfe = channelIndexOf(backend, outputId, "LFE");
+    CHECK(fc >= 0);
+    CHECK(lfe >= 0);
+    if (fc < 0 || lfe < 0) {
+        return;
+    }
+
+    const StripRow beforeFc = stripFor(backend, outputId, static_cast<uint32_t>(fc));
+    const StripRow beforeLfe = stripFor(backend, outputId, static_cast<uint32_t>(lfe));
+    CHECK(beforeFc.groupId.isEmpty());
+    CHECK(!qFuzzyCompare(beforeFc.gainDb, beforeLfe.gainDb)); // the test needs them to differ
+
+    const QString groupId = backend.createLinkGroup(
+        outputId, {static_cast<uint32_t>(fc), static_cast<uint32_t>(lfe)}, "Test");
+    CHECK(!groupId.isEmpty());
+
+    const StripRow afterFc = stripFor(backend, outputId, static_cast<uint32_t>(fc));
+    const StripRow afterLfe = stripFor(backend, outputId, static_cast<uint32_t>(lfe));
+    CHECK_EQ(afterFc.groupId, groupId);
+    CHECK_EQ(afterLfe.groupId, groupId);
+    // The LOWER index wins, matching the daemon's leader rule.
+    CHECK_NEAR(afterLfe.gainDb, beforeFc.gainDb, 1e-9);
+    CHECK_NEAR(afterFc.gainDb, beforeFc.gainDb, 1e-9);
+}
+
+// Linking shares the curve; that is what makes a linked pair a pair.
+void testDemoLinkSharesTheCurve() {
+    FakeBackend backend;
+    const QString outputId = "output-1";
+    const int fc = channelIndexOf(backend, outputId, "FC");
+    const int lfe = channelIndexOf(backend, outputId, "LFE");
+    if (fc < 0 || lfe < 0) {
+        return;
+    }
+
+    const auto fcBands = backend.getChannelEqBands(outputId, static_cast<uint32_t>(fc));
+    const auto lfeBandsBefore = backend.getChannelEqBands(outputId, static_cast<uint32_t>(lfe));
+    CHECK(!fcBands.empty());
+    CHECK(!lfeBandsBefore.empty());
+    CHECK(!(fcBands == lfeBandsBefore)); // they start different
+
+    backend.createLinkGroup(outputId, {static_cast<uint32_t>(fc), static_cast<uint32_t>(lfe)}, "T");
+
+    const auto lfeBandsAfter = backend.getChannelEqBands(outputId, static_cast<uint32_t>(lfe));
+    CHECK(lfeBandsAfter == fcBands);
+}
+
+void testDemoUnlinkSeparatesChannels() {
+    FakeBackend backend;
+    const QString outputId = "output-1";
+    // FL+FR are seeded already linked as group-1.
+    const int fl = channelIndexOf(backend, outputId, "FL");
+    const int fr = channelIndexOf(backend, outputId, "FR");
+    if (fl < 0 || fr < 0) {
+        return;
+    }
+    const StripRow linked = stripFor(backend, outputId, static_cast<uint32_t>(fl));
+    CHECK(!linked.groupId.isEmpty());
+
+    CHECK(backend.removeLinkGroup(outputId, linked.groupId));
+    CHECK(stripFor(backend, outputId, static_cast<uint32_t>(fl)).groupId.isEmpty());
+    CHECK(stripFor(backend, outputId, static_cast<uint32_t>(fr)).groupId.isEmpty());
+
+    // Unlinking must not change any value - it only stops them moving together.
+    CHECK_NEAR(stripFor(backend, outputId, static_cast<uint32_t>(fr)).gainDb, linked.gainDb, 1e-9);
+
+    // ...and editing one must no longer touch the other.
+    backend.setChannelEqBandCount(outputId, static_cast<uint32_t>(fl), 1);
+    backend.setChannelEqBand(outputId, static_cast<uint32_t>(fl), 0, "peaking", 500.0, -8.0, 2.0);
+    const auto frBands = backend.getChannelEqBands(outputId, static_cast<uint32_t>(fr));
+    CHECK(frBands.size() != 1 || !qFuzzyCompare(frBands.front().freqHz, 500.0));
+}
+
+void testDemoLinkRefusesInvalidRequests() {
+    FakeBackend backend;
+    const QString outputId = "output-1";
+    // Fewer than two channels is not a group.
+    CHECK(backend.createLinkGroup(outputId, {0}, "T").isEmpty());
+    CHECK(backend.createLinkGroup(outputId, {}, "T").isEmpty());
+    // A channel already in a group can't join another - a channel in two groups
+    // has no coherent meaning.
+    CHECK(backend.createLinkGroup(outputId, {0, 2}, "T").isEmpty());
+    // Out of range.
+    CHECK(backend.createLinkGroup(outputId, {2, 99}, "T").isEmpty());
+    // Unknown output.
+    CHECK(backend.createLinkGroup("nope", {0, 1}, "T").isEmpty());
+    CHECK(!backend.removeLinkGroup(outputId, "group-does-not-exist"));
+}
+
+// Gain, mute and sends move together for every member, which is what the strip
+// shows as one fader.
+void testDemoLinkedGainMovesAllMembers() {
+    FakeBackend backend;
+    const QString outputId = "output-1";
+    const int fl = channelIndexOf(backend, outputId, "FL");
+    const int fr = channelIndexOf(backend, outputId, "FR");
+    if (fl < 0 || fr < 0) {
+        return;
+    }
+    CHECK(backend.setChannelGain(outputId, static_cast<uint32_t>(fl), -13.5));
+    CHECK_NEAR(stripFor(backend, outputId, static_cast<uint32_t>(fr)).gainDb, -13.5, 1e-9);
+
+    CHECK(backend.setChannelMuted(outputId, static_cast<uint32_t>(fr), true));
+    CHECK(stripFor(backend, outputId, static_cast<uint32_t>(fl)).muted);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -468,6 +606,12 @@ int main(int argc, char** argv) {
     RUN(testTaperGivesTheUsefulRangeMostOfTheTravel);
     RUN(testTaperEndsAndDetent);
     RUN(testTaperResolutionNearUnity);
+
+    RUN(testDemoLinkAdoptsLeaderValues);
+    RUN(testDemoLinkSharesTheCurve);
+    RUN(testDemoUnlinkSeparatesChannels);
+    RUN(testDemoLinkRefusesInvalidRequests);
+    RUN(testDemoLinkedGainMovesAllMembers);
 
     return pipeeq::test::summary("gui_model");
 }

@@ -91,6 +91,14 @@ public:
     void addInput(const QString& displayName);
     void removeInput(const QString& inputId);
 
+    // ---- linking ----
+    void linkChannels(const QString& outputId, const QVector<uint32_t>& channelIndices);
+    void unlinkGroup(const QString& outputId, const QString& groupId);
+    void setGroupChannels(const QString& outputId, const QString& groupId,
+                           const QVector<uint32_t>& channelIndices);
+    // The channel indices of a group, in channel order.
+    QVector<uint32_t> groupChannels(const QString& outputId, const QString& groupId) const;
+
     void setMeteringEnabled(bool enabled);
     void refresh();
 
