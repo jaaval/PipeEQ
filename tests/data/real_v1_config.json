@@ -1,0 +1,50 @@
+{
+  "inputs": [
+    {
+      "display_name": "Default",
+      "id": "input-1"
+    },
+    {
+      "display_name": "Testi",
+      "id": "input-2"
+    }
+  ],
+  "routes": [
+    {
+      "bands": [
+        {
+          "freq_hz": 1000.0,
+          "gain_db": 0.0,
+          "q": 0.86,
+          "type": "peaking"
+        },
+        {
+          "freq_hz": 288.4834510482133,
+          "gain_db": -5.414141414141412,
+          "q": 0.707,
+          "type": "peaking"
+        }
+      ],
+      "device_name": "alsa_output.pci-0000_01_00.1.hdmi-stereo",
+      "display_name": "GB203 High Definition Audio Controller Digital Stereo (HDMI)",
+      "gain_db": 0.0,
+      "id": "route-1",
+      "input_gains_db": {
+        "input-1": 0.0
+      },
+      "muted": false
+    },
+    {
+      "bands": [],
+      "device_name": "alsa_output.usb-Focusrite_Scarlett_4i4_USB_D8PKPUZ2B2E4D2-00.analog-surround-40",
+      "display_name": "Scarlett 4i4 USB Analog Surround 4.0",
+      "gain_db": 0.0,
+      "id": "route-2",
+      "input_gains_db": {
+        "input-1": 0.0,
+        "input-2": 0.0
+      },
+      "muted": false
+    }
+  ]
+}

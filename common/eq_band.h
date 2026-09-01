@@ -14,6 +14,11 @@ struct EqBand {
     BiquadCoeffs toCoeffs(double sampleRateHz) const {
         return computeBiquadCoeffs(type, freqHz, sampleRateHz, gainDb, q);
     }
+
+    // Exact comparison on purpose: this is used to check that a config
+    // survives a save/load round trip bit-for-bit, where "close enough" would
+    // hide a lossy serialization.
+    bool operator==(const EqBand&) const = default;
 };
 
 } // namespace eqcore
