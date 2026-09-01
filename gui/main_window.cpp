@@ -59,11 +59,9 @@ QString wireNameFor(eqcore::FilterType type) {
 
 } // namespace
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
+MainWindow::MainWindow(Backend* backend, QWidget* parent) : QMainWindow(parent), backend_(backend) {
     setWindowTitle("PipeEQ");
     resize(1000, 640);
-
-    dbus_ = new DbusClient(this);
 
     auto* central = new QWidget(this);
     auto* rootLayout = new QHBoxLayout(central);
@@ -185,10 +183,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     statusLabel_ = new QLabel(this);
     statusBar()->addWidget(statusLabel_);
 
-    connect(dbus_, &DbusClient::outputChanged, this, &MainWindow::onDaemonOutputChanged);
-    connect(dbus_, &DbusClient::outputsChanged, this, &MainWindow::refreshStrips);
-    connect(dbus_, &DbusClient::inputsChanged, this, &MainWindow::onDaemonInputsChanged);
-    connect(dbus_, &DbusClient::devicesChanged, this, &MainWindow::refreshDevices);
+    connect(backend_, &Backend::outputChanged, this, &MainWindow::onDaemonOutputChanged);
+    connect(backend_, &Backend::outputsChanged, this, &MainWindow::refreshStrips);
+    connect(backend_, &Backend::inputsChanged, this, &MainWindow::onDaemonInputsChanged);
+    connect(backend_, &Backend::devicesChanged, this, &MainWindow::refreshDevices);
 
     refreshDevices();
     refreshInputs();
@@ -226,7 +224,7 @@ bool MainWindow::channelUnavailable(const StripRow& strip) const {
 // ---------------------------------------------------------------- refreshing --
 
 void MainWindow::refreshDevices() {
-    devices_ = dbus_->listDevices();
+    devices_ = backend_->listDevices();
 
     const QString previous = deviceCombo_->currentData().toString();
     const bool wasSuppressed = suppressSignals_;
@@ -250,7 +248,7 @@ void MainWindow::refreshDevices() {
 }
 
 void MainWindow::refreshStrips() {
-    const std::vector<StripRow> updated = dbus_->listStrips();
+    const std::vector<StripRow> updated = backend_->listStrips();
 
     // Only rebuild the list widget when the SET of strips changed. Rebuilding
     // it on every refresh would reset the selection and yank the detail pane
@@ -295,7 +293,7 @@ void MainWindow::refreshStrips() {
 }
 
 void MainWindow::refreshInputs() {
-    inputs_ = dbus_->listInputs();
+    inputs_ = backend_->listInputs();
     rebuildMixerTable();
 }
 
@@ -351,8 +349,16 @@ void MainWindow::updateStripStatus() {
     detailTabs_->setEnabled(haveStrip);
 
     if (!haveStrip) {
-        statusLabel_->setText(strips_.empty() ? "No outputs configured. Pick a device and press Add."
-                                              : "No channel selected.");
+        // "No daemon" and "no outputs yet" used to be indistinguishable here,
+        // which made a daemon that wasn't running look like a working one with
+        // nothing configured.
+        if (!backend_->isAvailable()) {
+            statusLabel_->setText("Not connected to pipeeq-daemon. Is the service running?");
+        } else {
+            statusLabel_->setText(strips_.empty()
+                                       ? "No outputs configured. Pick a device and press Add."
+                                       : "No channel selected.");
+        }
         gainLabel_->setText("- dB");
         return;
     }
@@ -411,7 +417,7 @@ void MainWindow::loadStripDetail(const StripRow& strip) {
     rebuildPositionCombo(strip);
 
     const std::vector<eqcore::EqBand> bands =
-        dbus_->getChannelEqBands(strip.outputId, strip.channelIndex);
+        backend_->getChannelEqBands(strip.outputId, strip.channelIndex);
 
     const bool wasSuppressed = suppressSignals_;
     suppressSignals_ = true;
@@ -462,7 +468,7 @@ void MainWindow::onAddOutputClicked() {
         return;
     }
     const QString label = deviceCombo_->currentText();
-    const QString outputId = dbus_->addOutput(deviceName, label);
+    const QString outputId = backend_->addOutput(deviceName, label);
     refreshStrips();
     if (!outputId.isEmpty()) {
         selectStrip(outputId + "#0");
@@ -482,7 +488,7 @@ void MainWindow::onRemoveOutputClicked() {
     if (answer != QMessageBox::Yes) {
         return;
     }
-    dbus_->removeOutput(strip->outputId);
+    backend_->removeOutput(strip->outputId);
     refreshStrips();
 }
 
@@ -495,7 +501,7 @@ void MainWindow::onGainSliderChanged(int value) {
         return;
     }
     gainLabel_->setText(QString("%1 dB").arg(value));
-    dbus_->setChannelGain(strip->outputId, strip->channelIndex, value);
+    backend_->setChannelGain(strip->outputId, strip->channelIndex, value);
 }
 
 void MainWindow::onMuteToggled(bool checked) {
@@ -503,7 +509,7 @@ void MainWindow::onMuteToggled(bool checked) {
         return;
     }
     if (const StripRow* strip = findStrip(currentStripId_)) {
-        dbus_->setChannelMuted(strip->outputId, strip->channelIndex, checked);
+        backend_->setChannelMuted(strip->outputId, strip->channelIndex, checked);
     }
 }
 
@@ -512,7 +518,7 @@ void MainWindow::onAutoConnectToggled(bool checked) {
         return;
     }
     if (const StripRow* strip = findStrip(currentStripId_)) {
-        dbus_->setOutputAutoConnect(strip->outputId, checked);
+        backend_->setOutputAutoConnect(strip->outputId, checked);
     }
 }
 
@@ -528,7 +534,7 @@ void MainWindow::onChannelPositionChanged(int index) {
     if (position == strip->position) {
         return;
     }
-    dbus_->setChannelPosition(strip->outputId, strip->channelIndex, position);
+    backend_->setChannelPosition(strip->outputId, strip->channelIndex, position);
     refreshStrips();
 }
 
@@ -542,10 +548,10 @@ void MainWindow::onBandCountChanged(int count) {
     if (!strip) {
         return;
     }
-    dbus_->setChannelEqBandCount(strip->outputId, strip->channelIndex,
+    backend_->setChannelEqBandCount(strip->outputId, strip->channelIndex,
                                   static_cast<uint32_t>(count));
     const std::vector<eqcore::EqBand> bands =
-        dbus_->getChannelEqBands(strip->outputId, strip->channelIndex);
+        backend_->getChannelEqBands(strip->outputId, strip->channelIndex);
     rebuildBandTable(bands);
     curveWidget_->setBands(bands);
 }
@@ -614,7 +620,7 @@ void MainWindow::pushBandRow(int row) {
     }
 
     const auto type = static_cast<eqcore::FilterType>(typeCombo->currentIndex());
-    dbus_->setChannelEqBand(strip->outputId, strip->channelIndex, static_cast<uint32_t>(row),
+    backend_->setChannelEqBand(strip->outputId, strip->channelIndex, static_cast<uint32_t>(row),
                              wireNameFor(type), freqSpin->value(), gainSpin->value(), qSpin->value());
 
     eqcore::EqBand band;
@@ -651,7 +657,7 @@ void MainWindow::onCurveBandEdited(int index, eqcore::EqBand band) {
     }
     suppressSignals_ = wasSuppressed;
 
-    dbus_->setChannelEqBand(strip->outputId, strip->channelIndex, static_cast<uint32_t>(index),
+    backend_->setChannelEqBand(strip->outputId, strip->channelIndex, static_cast<uint32_t>(index),
                              wireNameFor(band.type), band.freqHz, band.gainDb, band.q);
 }
 
@@ -661,7 +667,7 @@ void MainWindow::onCopyEqClicked() {
         return;
     }
     const std::vector<eqcore::EqBand> bands =
-        dbus_->getChannelEqBands(source->outputId, source->channelIndex);
+        backend_->getChannelEqBands(source->outputId, source->channelIndex);
 
     QDialog dialog(this);
     dialog.setWindowTitle("Copy EQ to...");
@@ -702,10 +708,10 @@ void MainWindow::onCopyEqClicked() {
         // instance: sharing is what the assignment matrix in the new UI is for,
         // and doing it implicitly here would surprise anyone who then edited
         // one side.
-        dbus_->setChannelEqBandCount(target->outputId, target->channelIndex,
+        backend_->setChannelEqBandCount(target->outputId, target->channelIndex,
                                       static_cast<uint32_t>(bands.size()));
         for (std::size_t i = 0; i < bands.size(); ++i) {
-            dbus_->setChannelEqBand(target->outputId, target->channelIndex,
+            backend_->setChannelEqBand(target->outputId, target->channelIndex,
                                      static_cast<uint32_t>(i), wireNameFor(bands[i].type),
                                      bands[i].freqHz, bands[i].gainDb, bands[i].q);
         }
@@ -725,7 +731,7 @@ void MainWindow::rebuildMixerTable() {
 
     std::vector<std::pair<QString, double>> sends;
     if (strip) {
-        sends = dbus_->getChannelSends(strip->outputId, strip->channelIndex);
+        sends = backend_->getChannelSends(strip->outputId, strip->channelIndex);
     }
 
     for (int row = 0; row < static_cast<int>(inputs_.size()); ++row) {
@@ -783,11 +789,11 @@ void MainWindow::pushMixerRow(int row) {
     levelSlider->setEnabled(onCheck->isChecked());
 
     if (!onCheck->isChecked()) {
-        dbus_->removeSend(strip->outputId, strip->channelIndex, inputId);
+        backend_->removeSend(strip->outputId, strip->channelIndex, inputId);
         return;
     }
 
-    if (!dbus_->setSend(strip->outputId, strip->channelIndex, inputId, levelSlider->value())) {
+    if (!backend_->setSend(strip->outputId, strip->channelIndex, inputId, levelSlider->value())) {
         // The daemon refused - almost always because this output already sends
         // from the maximum number of inputs. Saying so beats leaving a switch
         // that looks on but does nothing.
@@ -810,7 +816,7 @@ void MainWindow::onAddInputClicked() {
     if (!accepted || name.trimmed().isEmpty()) {
         return;
     }
-    dbus_->addInput(name.trimmed());
+    backend_->addInput(name.trimmed());
     refreshInputs();
 }
 
@@ -830,7 +836,7 @@ void MainWindow::onRemoveInputClicked() {
     if (answer != QMessageBox::Yes) {
         return;
     }
-    dbus_->removeInput(nameItem->data(Qt::UserRole).toString());
+    backend_->removeInput(nameItem->data(Qt::UserRole).toString());
     refreshInputs();
 }
 

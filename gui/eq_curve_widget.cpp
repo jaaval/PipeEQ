@@ -1,5 +1,7 @@
 #include "eq_curve_widget.h"
 
+#include "theme/theme.h"
+
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -72,12 +74,17 @@ void EqCurveWidget::paintEvent(QPaintEvent* /*event*/) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
 
+    // Colours come from the theme tokens, which are themselves derived from the
+    // palette - so this still renders sensibly in a bare QWidget harness with
+    // no theme installed.
+    const theme::Tokens tokens = theme::tokensFor(this);
+
     const QRectF r = plotRect();
-    painter.fillRect(rect(), palette().base());
-    painter.setPen(QPen(palette().mid().color(), 1));
+    painter.fillRect(rect(), tokens.surfaceSunken);
+    painter.setPen(QPen(tokens.border, 1));
     painter.drawRect(r);
 
-    painter.setPen(QPen(palette().mid().color(), 1, Qt::DotLine));
+    painter.setPen(QPen(tokens.gridLine, 1, Qt::DotLine));
     for (double freq : {100.0, 1000.0, 10000.0}) {
         const double x = freqToX(freq);
         painter.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()));
@@ -86,7 +93,7 @@ void EqCurveWidget::paintEvent(QPaintEvent* /*event*/) {
         const double y = gainToY(gain);
         painter.drawLine(QPointF(r.left(), y), QPointF(r.right(), y));
     }
-    painter.setPen(QPen(palette().text().color(), 1.5));
+    painter.setPen(QPen(tokens.textDim, 1.5));
     painter.drawLine(QPointF(r.left(), gainToY(0.0)), QPointF(r.right(), gainToY(0.0)));
 
     if (!bands_.empty()) {
@@ -110,15 +117,27 @@ void EqCurveWidget::paintEvent(QPaintEvent* /*event*/) {
                 path.lineTo(x, y);
             }
         }
-        painter.setPen(QPen(palette().highlight().color(), 2));
+        // Fill under the curve as well as stroking it: at preview size the
+        // stroke alone is hard to read against the grid.
+        QPainterPath fill = path;
+        fill.lineTo(r.right(), gainToY(0.0));
+        fill.lineTo(r.left(), gainToY(0.0));
+        fill.closeSubpath();
+        painter.setBrush(tokens.curveFill);
+        painter.setPen(Qt::NoPen);
+        painter.drawPath(fill);
+
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(tokens.curve, 2));
         painter.drawPath(path);
     }
 
     for (std::size_t i = 0; i < bands_.size(); ++i) {
         const QPointF p(freqToX(bands_[i].freqHz), gainToY(bands_[i].gainDb));
-        painter.setBrush(palette().highlight());
-        painter.setPen(QPen(palette().text().color(), 1));
+        painter.setBrush(tokens.handle);
+        painter.setPen(QPen(tokens.text, 1));
         painter.drawEllipse(p, 5, 5);
+        painter.setFont(tokens.numericFont);
         painter.drawText(p + QPointF(7, -7), QString::number(i + 1));
     }
 }

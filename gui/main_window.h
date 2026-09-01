@@ -4,7 +4,7 @@
 
 #include <QMainWindow>
 
-#include "dbus_client.h"
+#include "backend.h"
 #include "eq_curve_widget.h"
 
 class QListWidget;
@@ -28,7 +28,9 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget* parent = nullptr);
+    // Takes the backend rather than creating one, so --demo can substitute a
+    // fake with no daemon behind it. Ownership stays with the caller.
+    explicit MainWindow(Backend* backend, QWidget* parent = nullptr);
 
 private slots:
     void onAddOutputClicked();
@@ -75,7 +77,7 @@ private:
     // The device row for a strip's target, or null when it isn't present.
     const DeviceRow* findDevice(const QString& nodeName) const;
 
-    DbusClient* dbus_;
+    Backend* backend_;
 
     QListWidget* stripList_ = nullptr;
     QComboBox* deviceCombo_ = nullptr;

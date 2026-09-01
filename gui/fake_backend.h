@@ -1,36 +1,34 @@
 #pragma once
 
-#include <cstdint>
-#include <memory>
-#include <utility>
+#include <map>
 #include <vector>
 
-#include <QObject>
-#include <QString>
-
-#include <sdbus-c++/sdbus-c++.h>
+#include <QTimer>
 
 #include "backend.h"
 
 namespace pipeeq {
 
-// Thin wrapper around an sdbus-c++ proxy to org.pipeeq.Daemon1. Method calls
-// are synchronous (fine for a control GUI - they're infrequent and local; the
-// planned rework moves them off the GUI thread). Signals received on the
-// proxy's own background thread are re-emitted as Qt signals, which Qt
-// automatically delivers to the GUI thread via a queued connection since this
-// object lives on it.
-class DbusClient : public Backend {
+// A Backend implementation with no daemon, no session bus and no PipeWire
+// behind it.
+//
+// This exists so the UI can be built, demoed and screenshotted against a fixed,
+// deliberately interesting topology: a 6-channel card, a 4-channel interface,
+// and one device that is absent so the "waiting" presentation is always
+// exercised. Screenshots are then comparable across runs and don't depend on
+// whatever hardware happens to be plugged into the machine.
+//
+// It also generates plausible moving levels, which is what lets the metering UI
+// be built before the daemon side of it is wired up.
+class FakeBackend : public Backend {
     Q_OBJECT
 
 public:
-    explicit DbusClient(QObject* parent = nullptr);
-    ~DbusClient() override;
+    explicit FakeBackend(QObject* parent = nullptr);
 
-    bool isAvailable() const override { return proxy_ != nullptr; }
+    bool isAvailable() const override { return true; }
 
     std::vector<DeviceRow> listDevices() override;
-    // One row per channel of every configured output.
     std::vector<StripRow> listStrips() override;
     std::vector<InputRow> listInputs() override;
 
@@ -43,9 +41,6 @@ public:
     bool setChannelPosition(const QString& outputId, uint32_t channelIndex,
                              const QString& position) override;
 
-    // The channel's EQ, via the daemon's channel-scoped convenience methods -
-    // so this client needs to know nothing about EQ instances. Setting a band
-    // count creates an instance for the channel on demand.
     std::vector<eqcore::EqBand> getChannelEqBands(const QString& outputId,
                                                    uint32_t channelIndex) override;
     bool setChannelEqBandCount(const QString& outputId, uint32_t channelIndex,
@@ -66,7 +61,38 @@ public:
     void setMeteringEnabled(bool enabled) override;
 
 private:
-    std::unique_ptr<sdbus::IProxy> proxy_;
+    struct Channel {
+        QString position;
+        QString displayName;
+        double gainDb = 0.0;
+        bool muted = false;
+        QString groupId;
+        std::vector<eqcore::EqBand> bands;
+        std::map<QString, double> sendsDb;
+    };
+    struct Output {
+        QString id;
+        QString deviceName;
+        QString displayName;
+        bool connected = true;
+        bool autoConnect = true;
+        std::vector<Channel> channels;
+    };
+
+    Output* findOutput(const QString& outputId);
+    Channel* findChannel(const QString& outputId, uint32_t channelIndex);
+    // Mirrors the daemon: gain, mute and sends are linked across a group.
+    std::vector<Channel*> linkedChannels(const QString& outputId, uint32_t channelIndex);
+    void emitMeters();
+
+    std::vector<DeviceRow> devices_;
+    std::vector<Output> outputs_;
+    std::vector<InputRow> inputs_;
+    int nextOutputIndex_ = 1;
+    int nextInputIndex_ = 1;
+
+    QTimer meterTimer_;
+    double meterPhase_ = 0.0;
 };
 
 } // namespace pipeeq

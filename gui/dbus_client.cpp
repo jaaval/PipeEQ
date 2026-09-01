@@ -19,6 +19,7 @@ using ChannelStructRow =
 using BandStructRow = sdbus::Struct<std::string, double, double, double>;
 using InputStructRow = sdbus::Struct<std::string, std::string, std::vector<std::string>>;
 using SendStructRow = sdbus::Struct<uint32_t, std::string, double>;
+using MeterStructRow = sdbus::Struct<std::string, std::vector<double>>;
 
 QString stripId(const QString& outputId, uint32_t channelIndex) {
     return outputId + "#" + QString::number(channelIndex);
@@ -26,20 +27,28 @@ QString stripId(const QString& outputId, uint32_t channelIndex) {
 
 } // namespace
 
-DbusClient::DbusClient(QObject* parent) : QObject(parent) {
+DbusClient::DbusClient(QObject* parent) : Backend(parent) {
     // Explicit session-bus connection rather than sdbus-c++'s ambiguous
     // "default bus" resolution, which (like plain `busctl` with no --user flag)
     // can resolve to the system bus in some environments - the daemon only ever
     // registers on the session bus.
+    try {
 #if SDBUSCPP_MAJOR_VERSION >= 2
-    proxy_ = sdbus::createProxy(sdbus::createSessionBusConnection(),
-                                 sdbus::ServiceName{eqcore::dbus::kServiceName},
-                                 sdbus::ObjectPath{eqcore::dbus::kObjectPath});
+        proxy_ = sdbus::createProxy(sdbus::createSessionBusConnection(),
+                                     sdbus::ServiceName{eqcore::dbus::kServiceName},
+                                     sdbus::ObjectPath{eqcore::dbus::kObjectPath});
 #else
-    proxy_ = sdbus::createProxy(sdbus::createSessionBusConnection(),
-                                 std::string(eqcore::dbus::kServiceName),
-                                 std::string(eqcore::dbus::kObjectPath));
+        proxy_ = sdbus::createProxy(sdbus::createSessionBusConnection(),
+                                     std::string(eqcore::dbus::kServiceName),
+                                     std::string(eqcore::dbus::kObjectPath));
 #endif
+    } catch (const sdbus::Error& e) {
+        // No session bus at all. Every call below then short-circuits on the
+        // null proxy and isAvailable() reports false, rather than the GUI
+        // dying on startup.
+        qWarning("pipeeq-gui: cannot reach the session bus: %s", e.what());
+        return;
+    }
 
     proxy_->uponSignal(eqcore::dbus::kSignalOutputChanged)
         .onInterface(eqcore::dbus::kInterfaceName)
@@ -61,12 +70,51 @@ DbusClient::DbusClient(QObject* parent) : QObject(parent) {
     proxy_->uponSignal(eqcore::dbus::kSignalDevicesChanged)
         .onInterface(eqcore::dbus::kInterfaceName)
         .call([this] { emit devicesChanged(); });
+
+    // Arrives on the proxy's own thread at the meter rate. Do nothing here but
+    // repack into PODs - the queued Qt connection delivers it to the GUI
+    // thread, and any real work belongs there.
+    proxy_->uponSignal(eqcore::dbus::kSignalMeters)
+        .onInterface(eqcore::dbus::kInterfaceName)
+        .call([this](const std::vector<MeterStructRow>& outputs,
+                      const std::vector<MeterStructRow>& inputs) {
+            const auto convert = [](const std::vector<MeterStructRow>& rows) {
+                QVector<MeterRow> out;
+                out.reserve(static_cast<int>(rows.size()));
+                for (const auto& row : rows) {
+                    MeterRow meter;
+                    meter.id = QString::fromStdString(std::get<0>(row));
+                    for (double peak : std::get<1>(row)) {
+                        meter.peaksDb.push_back(peak);
+                    }
+                    out.push_back(std::move(meter));
+                }
+                return out;
+            };
+            emit metersReceived(convert(outputs), convert(inputs));
+        });
+}
+
+void DbusClient::setMeteringEnabled(bool enabled) {
+    if (!proxy_) {
+        return;
+    }
+    try {
+        proxy_->callMethod(eqcore::dbus::kMethodSetMeteringEnabled)
+            .onInterface(eqcore::dbus::kInterfaceName)
+            .withArguments(enabled);
+    } catch (const sdbus::Error& e) {
+        qWarning("pipeeq-gui: SetMeteringEnabled failed: %s", e.what());
+    }
 }
 
 DbusClient::~DbusClient() = default;
 
 std::vector<DeviceRow> DbusClient::listDevices() {
     std::vector<DeviceRow> result;
+    if (!proxy_) {
+        return result;
+    }
     try {
         std::vector<DeviceStructRow> rows;
         proxy_->callMethod(eqcore::dbus::kMethodListDevices)
@@ -91,6 +139,9 @@ std::vector<DeviceRow> DbusClient::listDevices() {
 
 std::vector<StripRow> DbusClient::listStrips() {
     std::vector<StripRow> result;
+    if (!proxy_) {
+        return result;
+    }
     try {
         std::vector<OutputStructRow> outputs;
         proxy_->callMethod(eqcore::dbus::kMethodListOutputs)
@@ -139,6 +190,9 @@ std::vector<StripRow> DbusClient::listStrips() {
 }
 
 QString DbusClient::addOutput(const QString& deviceName, const QString& displayName) {
+    if (!proxy_) {
+        return {};
+    }
     try {
         std::string outputId;
         proxy_->callMethod(eqcore::dbus::kMethodAddOutput)
@@ -153,6 +207,9 @@ QString DbusClient::addOutput(const QString& deviceName, const QString& displayN
 }
 
 void DbusClient::removeOutput(const QString& outputId) {
+    if (!proxy_) {
+        return;
+    }
     try {
         proxy_->callMethod(eqcore::dbus::kMethodRemoveOutput)
             .onInterface(eqcore::dbus::kInterfaceName)
@@ -163,6 +220,9 @@ void DbusClient::removeOutput(const QString& outputId) {
 }
 
 bool DbusClient::setOutputAutoConnect(const QString& outputId, bool autoConnect) {
+    if (!proxy_) {
+        return false;
+    }
     try {
         bool ok = false;
         proxy_->callMethod(eqcore::dbus::kMethodSetOutputAutoConnect)
@@ -177,6 +237,9 @@ bool DbusClient::setOutputAutoConnect(const QString& outputId, bool autoConnect)
 }
 
 bool DbusClient::setChannelGain(const QString& outputId, uint32_t channelIndex, double gainDb) {
+    if (!proxy_) {
+        return false;
+    }
     try {
         bool ok = false;
         proxy_->callMethod(eqcore::dbus::kMethodSetChannelGain)
@@ -191,6 +254,9 @@ bool DbusClient::setChannelGain(const QString& outputId, uint32_t channelIndex, 
 }
 
 bool DbusClient::setChannelMuted(const QString& outputId, uint32_t channelIndex, bool muted) {
+    if (!proxy_) {
+        return false;
+    }
     try {
         bool ok = false;
         proxy_->callMethod(eqcore::dbus::kMethodSetChannelMuted)
@@ -206,6 +272,9 @@ bool DbusClient::setChannelMuted(const QString& outputId, uint32_t channelIndex,
 
 bool DbusClient::setChannelPosition(const QString& outputId, uint32_t channelIndex,
                                      const QString& position) {
+    if (!proxy_) {
+        return false;
+    }
     try {
         bool ok = false;
         proxy_->callMethod(eqcore::dbus::kMethodSetChannelPosition)
@@ -222,6 +291,9 @@ bool DbusClient::setChannelPosition(const QString& outputId, uint32_t channelInd
 std::vector<eqcore::EqBand> DbusClient::getChannelEqBands(const QString& outputId,
                                                            uint32_t channelIndex) {
     std::vector<eqcore::EqBand> result;
+    if (!proxy_) {
+        return result;
+    }
     try {
         std::vector<BandStructRow> rows;
         proxy_->callMethod(eqcore::dbus::kMethodGetChannelEqBands)
@@ -244,6 +316,9 @@ std::vector<eqcore::EqBand> DbusClient::getChannelEqBands(const QString& outputI
 
 bool DbusClient::setChannelEqBandCount(const QString& outputId, uint32_t channelIndex,
                                         uint32_t count) {
+    if (!proxy_) {
+        return false;
+    }
     try {
         bool ok = false;
         proxy_->callMethod(eqcore::dbus::kMethodSetChannelEqBandCount)
@@ -259,6 +334,9 @@ bool DbusClient::setChannelEqBandCount(const QString& outputId, uint32_t channel
 
 bool DbusClient::setChannelEqBand(const QString& outputId, uint32_t channelIndex, uint32_t index,
                                    const QString& type, double freqHz, double gainDb, double q) {
+    if (!proxy_) {
+        return false;
+    }
     try {
         bool ok = false;
         proxy_->callMethod(eqcore::dbus::kMethodSetChannelEqBand)
@@ -275,6 +353,9 @@ bool DbusClient::setChannelEqBand(const QString& outputId, uint32_t channelIndex
 
 std::vector<InputRow> DbusClient::listInputs() {
     std::vector<InputRow> result;
+    if (!proxy_) {
+        return result;
+    }
     try {
         std::vector<InputStructRow> rows;
         proxy_->callMethod(eqcore::dbus::kMethodListInputs)
@@ -296,6 +377,9 @@ std::vector<InputRow> DbusClient::listInputs() {
 }
 
 QString DbusClient::addInput(const QString& displayName) {
+    if (!proxy_) {
+        return {};
+    }
     try {
         std::string inputId;
         // An empty layout means stereo, which is what the old GUI always made.
@@ -311,6 +395,9 @@ QString DbusClient::addInput(const QString& displayName) {
 }
 
 void DbusClient::removeInput(const QString& inputId) {
+    if (!proxy_) {
+        return;
+    }
     try {
         proxy_->callMethod(eqcore::dbus::kMethodRemoveInput)
             .onInterface(eqcore::dbus::kInterfaceName)
@@ -322,6 +409,9 @@ void DbusClient::removeInput(const QString& inputId) {
 
 bool DbusClient::setSend(const QString& outputId, uint32_t channelIndex, const QString& inputId,
                           double gainDb) {
+    if (!proxy_) {
+        return false;
+    }
     try {
         bool ok = false;
         proxy_->callMethod(eqcore::dbus::kMethodSetSend)
@@ -336,6 +426,9 @@ bool DbusClient::setSend(const QString& outputId, uint32_t channelIndex, const Q
 }
 
 bool DbusClient::removeSend(const QString& outputId, uint32_t channelIndex, const QString& inputId) {
+    if (!proxy_) {
+        return false;
+    }
     try {
         bool ok = false;
         proxy_->callMethod(eqcore::dbus::kMethodRemoveSend)
@@ -352,6 +445,9 @@ bool DbusClient::removeSend(const QString& outputId, uint32_t channelIndex, cons
 std::vector<std::pair<QString, double>> DbusClient::getChannelSends(const QString& outputId,
                                                                      uint32_t channelIndex) {
     std::vector<std::pair<QString, double>> result;
+    if (!proxy_) {
+        return result;
+    }
     try {
         std::vector<SendStructRow> rows;
         proxy_->callMethod(eqcore::dbus::kMethodGetSends)
