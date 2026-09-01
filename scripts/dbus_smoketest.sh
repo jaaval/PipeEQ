@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# End-to-end check of the org.pipeeq.Daemon1 surface against a real daemon.
+#
+# Unlike the WSL scripts this replaces, every step ASSERTS: the old ones printed
+# busctl output for a human to eyeball, which meant they kept "passing" after
+# the behaviour they described had changed.
+#
+# Runs against a throwaway XDG_CONFIG_HOME so it can never touch a real config,
+# and it never changes card profiles or default sinks.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+BUILD_DIR="${BUILD_DIR:-build}"
+DAEMON="$BUILD_DIR/daemon/pipeeq-daemon"
+BUS="busctl --user"
+DEST="org.pipeeq.Daemon1 /org/pipeeq/Daemon1 org.pipeeq.Daemon1"
+
+failures=0
+check() {
+    local what="$1" expected="$2" actual="$3"
+    if [[ "$actual" == *"$expected"* ]]; then
+        echo "ok: $what"
+    else
+        echo "FAIL: $what" >&2
+        echo "      expected to contain: $expected" >&2
+        echo "      actual:              $actual" >&2
+        failures=$((failures + 1))
+    fi
+}
+
+if [[ ! -x "$DAEMON" ]]; then
+    echo "FAIL: $DAEMON not built" >&2
+    exit 1
+fi
+
+WORKDIR="$(mktemp -d)"
+export XDG_CONFIG_HOME="$WORKDIR/config"
+mkdir -p "$XDG_CONFIG_HOME"
+
+cleanup() {
+    [[ -n "${DAEMON_PID:-}" ]] && kill "$DAEMON_PID" 2>/dev/null
+    wait "$DAEMON_PID" 2>/dev/null
+    rm -rf "$WORKDIR"
+}
+trap cleanup EXIT
+
+"$DAEMON" > "$WORKDIR/daemon.log" 2>&1 &
+DAEMON_PID=$!
+
+for _ in $(seq 1 50); do
+    $BUS list 2>/dev/null | grep -q org.pipeeq.Daemon1 && break
+    sleep 0.1
+done
+if ! $BUS list 2>/dev/null | grep -q org.pipeeq.Daemon1; then
+    echo "FAIL: daemon never claimed the bus name" >&2
+    cat "$WORKDIR/daemon.log" >&2
+    exit 1
+fi
+
+# ---- a fresh config starts empty ----
+check "no outputs on a fresh config" "a(sssbbuuu) 0" "$($BUS call $DEST ListOutputs)"
+check "no inputs on a fresh config" "a(ssas) 0" "$($BUS call $DEST ListInputs)"
+
+# ---- inputs ----
+INPUT_ID=$($BUS call $DEST AddInput sas Music 0 | tr -d 's "')
+check "AddInput returns an id" "input-" "$INPUT_ID"
+check "the new input is stereo" '"FL" "FR"' "$($BUS call $DEST ListInputs)"
+
+SURROUND_ID=$($BUS call $DEST AddInput sas Film 6 FL FR FC LFE RL RR | tr -d 's "')
+check "a 5.1 input keeps its layout" '"FC" "LFE"' "$($BUS call $DEST ListInputs)"
+
+# ---- outputs on a device that isn't present ----
+OUTPUT_ID=$($BUS call $DEST AddOutput ss nonexistent_device Ghost | tr -d 's "')
+check "AddOutput returns an id" "output-" "$OUTPUT_ID"
+check "an absent device yields a disconnected output" "false" "$($BUS call $DEST ListOutputs)"
+
+# A device that isn't there has no layout, so there are no channels to drive
+# yet - the output is configured and waits, which is the documented behaviour.
+check "a pending output has no channels yet" "a(ussdbssb) 0" \
+    "$($BUS call $DEST GetOutputChannels s "$OUTPUT_ID" 2>&1 || true)"
+
+# ---- an output on a REAL device, so there are channels to exercise ----
+# Prefer an HDMI sink when there is one: it's the least likely to be part of a
+# live monitoring chain on a machine someone is working on. This only opens a
+# silent playback stream - it never touches card profiles or the default sink.
+DEVICES=$($BUS call $DEST ListDevices | grep -oP '"alsa_output[^"]*"' | tr -d '"')
+DEVICE=$(grep -i hdmi <<< "$DEVICES" | head -1)
+[[ -z "$DEVICE" ]] && DEVICE=$(head -1 <<< "$DEVICES")
+if [[ -z "$DEVICE" ]]; then
+    echo "skip: no real ALSA sink present; channel/EQ/link checks need one"
+else
+    REAL_ID=$($BUS call $DEST AddOutput ss "$DEVICE" Test | tr -d 's "')
+    sleep 0.5
+    CHANNELS=$($BUS call $DEST GetOutputChannels s "$REAL_ID")
+    check "a present device yields channels" '"FL"' "$CHANNELS"
+    check "a present device connects" "true" "$($BUS call $DEST ListOutputs)"
+
+    # ---- per-channel gain ----
+    check "SetChannelGain succeeds" "b true" \
+        "$($BUS call $DEST SetChannelGain sud -- "$REAL_ID" 0 -6.5)"
+    check "the gain landed on channel 0" "-6.5" "$($BUS call $DEST GetOutputChannels s "$REAL_ID")"
+
+    # ---- link groups: one set must move both members ----
+    GROUP_ID=$($BUS call $DEST CreateLinkGroup saus "$REAL_ID" 2 0 1 Mains | tr -d 's "')
+    check "CreateLinkGroup returns an id" "group-" "$GROUP_ID"
+    $BUS call $DEST SetChannelGain sud -- "$REAL_ID" 0 -12.0 > /dev/null
+    LINKED=$($BUS call $DEST GetOutputChannels s "$REAL_ID")
+    linked_count=$(grep -o -- "-12" <<< "$LINKED" | wc -l)
+    if [[ "$linked_count" -ge 2 ]]; then
+        echo "ok: a gain set on a linked channel moved both members"
+    else
+        echo "FAIL: a gain set on a linked channel did not move both members" >&2
+        echo "      $LINKED" >&2
+        failures=$((failures + 1))
+    fi
+
+    # A channel already in a group must not join another.
+    check "overlapping link groups are refused" '""' \
+        "$($BUS call $DEST CreateLinkGroup saus "$REAL_ID" 2 1 0 Again)"
+
+    # ---- per-channel EQ via the convenience methods ----
+    check "SetChannelEqBandCount succeeds" "b true" \
+        "$($BUS call $DEST SetChannelEqBandCount suu "$REAL_ID" 0 2)"
+    check "SetChannelEqBand succeeds" "b true" \
+        "$($BUS call $DEST SetChannelEqBand suusddd -- "$REAL_ID" 0 0 peaking 250 -4.5 1.2)"
+    BANDS=$($BUS call $DEST GetChannelEqBands su "$REAL_ID" 0)
+    check "the band round-trips" "250" "$BANDS"
+    check "the band gain round-trips" "-4.5" "$BANDS"
+
+    # An instance was created on demand and assigned to that channel.
+    check "an EQ instance was created on demand" "eq-" "$($BUS call $DEST ListEqInstances s "$REAL_ID")"
+
+    # EQ assignment is deliberately NOT linked - that's the point of per-channel
+    # EQ - so channel 1 must still be flat despite being in the same group.
+    check "channel 1's EQ is independent of channel 0's" "a(sddd) 0" \
+        "$($BUS call $DEST GetChannelEqBands su "$REAL_ID" 1)"
+
+    # ---- sends ----
+    check "SetSend succeeds" "b true" \
+        "$($BUS call $DEST SetSend susd -- "$REAL_ID" 0 "$INPUT_ID" -3.0)"
+    check "the send is reported" "$INPUT_ID" "$($BUS call $DEST GetSends s "$REAL_ID")"
+    check "RemoveSend succeeds" "b true" \
+        "$($BUS call $DEST RemoveSend sus "$REAL_ID" 0 "$INPUT_ID")"
+
+    # ---- channel position is metadata, not a reconnect ----
+    check "SetChannelPosition succeeds" "b true" \
+        "$($BUS call $DEST SetChannelPosition sus "$REAL_ID" 0 FC)"
+    check "the output stayed connected across a position change" "true" \
+        "$($BUS call $DEST ListOutputs)"
+
+    $BUS call $DEST RemoveOutput s "$REAL_ID" > /dev/null
+fi
+
+# ---- metering is off until armed ----
+METER_LOG="$WORKDIR/monitor.log"
+timeout 1 $BUS monitor org.pipeeq.Daemon1 > "$METER_LOG" 2>&1 || true
+if grep -q "Meters" "$METER_LOG"; then
+    echo "FAIL: Meters was emitted without SetMeteringEnabled" >&2
+    failures=$((failures + 1))
+else
+    echo "ok: no Meters traffic before it is armed"
+fi
+
+$BUS call $DEST SetMeteringEnabled b true > /dev/null
+timeout 1 $BUS monitor org.pipeeq.Daemon1 > "$METER_LOG" 2>&1 || true
+meter_count=$(grep -c "Meters" "$METER_LOG" || true)
+if [[ "$meter_count" -gt 5 ]]; then
+    echo "ok: Meters is emitted once armed ($meter_count in ~1s)"
+else
+    echo "FAIL: expected repeated Meters signals once armed, saw $meter_count" >&2
+    failures=$((failures + 1))
+fi
+
+# ---- inputs are removable ----
+$BUS call $DEST RemoveInput s "$SURROUND_ID" > /dev/null
+$BUS call $DEST RemoveInput s "$INPUT_ID" > /dev/null
+check "inputs were removed" "a(ssas) 0" "$($BUS call $DEST ListInputs)"
+
+# ---- the config was written, in v2 ----
+sleep 1
+if [[ -f "$XDG_CONFIG_HOME/pipeeq/config.json" ]]; then
+    check "the config is v2" '"version": 2' "$(cat "$XDG_CONFIG_HOME/pipeeq/config.json")"
+else
+    echo "FAIL: no config was written" >&2
+    failures=$((failures + 1))
+fi
+
+echo
+if [[ "$failures" -gt 0 ]]; then
+    echo "$failures check(s) FAILED"
+    echo "--- daemon log ---"
+    cat "$WORKDIR/daemon.log"
+    exit 1
+fi
+echo "All D-Bus smoke checks passed."

@@ -2,9 +2,16 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <map>
 #include <string_view>
 
+#include <spa/param/audio/raw.h>
 #include <spa/utils/dict.h>
+
+#include "adopt_layout.h"
+#include "channel_layout.h"
+#include "mix_plan.h"
 
 namespace pipeeq {
 
@@ -47,27 +54,27 @@ int idSuffix(const std::string& id, std::string_view prefix) {
     return value;
 }
 
+
+} // namespace
+
+std::vector<std::string> DeviceInfo::streamPositions() const {
+    if (!positions.empty()) {
+        return positions;
+    }
+    // The device advertises no layout. Substitute the conventional one for its
+    // channel count, which for anything unusual is AUX0..AUXn - honest about
+    // "we don't know what these are" rather than guessing a layout the
+    // hardware may not have. Two channels is the safe fallback when even the
+    // channel count is missing.
+    return layout::defaultPositionsFor(channelCount > 0 ? static_cast<int>(channelCount) : 2);
+}
+
+namespace {
+
 const DeviceInfo* findDevice(const std::vector<DeviceInfo>& devices, const std::string& nodeName) {
     auto it = std::find_if(devices.begin(), devices.end(),
                             [&](const DeviceInfo& d) { return d.nodeName == nodeName; });
     return it == devices.end() ? nullptr : &*it;
-}
-
-bool deviceOffersPair(const DeviceInfo& device, const std::string& leftChannel,
-                       const std::string& rightChannel) {
-    if (leftChannel.empty() || rightChannel.empty()) {
-        return true; // "device default" is always available
-    }
-    return std::any_of(device.pairs.begin(), device.pairs.end(), [&](const ChannelPair& pair) {
-        return pair.leftName == leftChannel && pair.rightName == rightChannel;
-    });
-}
-
-std::string pairDescription(const std::string& leftChannel, const std::string& rightChannel) {
-    if (leftChannel.empty() || rightChannel.empty()) {
-        return "the device default channels";
-    }
-    return "channels " + leftChannel + "/" + rightChannel;
 }
 
 } // namespace
@@ -107,8 +114,8 @@ bool AudioEngine::start() {
     waitForRegistrySync();
     // A second roundtrip: handling those globals issued a bind per sink, and
     // it's the resulting node info that carries each device's channel layout.
-    // Without this, a route restored for a specific stereo pair would be
-    // judged against a device whose pairs aren't known yet.
+    // Without this, a restored output would open its stream before its device's
+    // real channel layout is known.
     waitForRegistrySync();
     return true;
 }
@@ -180,43 +187,36 @@ void AudioEngine::applyConfig(const eqcore::AppConfig& config) {
                          inputConfig.id.c_str());
             continue;
         }
-        addInputLocked(inputConfig.id, inputConfig.displayName);
+        addInputLocked(inputConfig.id, inputConfig.displayName, inputConfig.positions);
     }
 
-    for (const auto& routeConfig : config.routes) {
-        if (routeConfig.id.empty() || findEntryLocked(routeConfig.id)) {
-            std::fprintf(stderr, "pipeeq: skipping saved route with a missing or duplicate id '%s'\n",
-                         routeConfig.id.c_str());
+    for (const auto& outputConfig : config.outputs) {
+        if (outputConfig.id.empty() || findEntryLocked(outputConfig.id)) {
+            std::fprintf(stderr, "pipeeq: skipping saved output with a missing or duplicate id '%s'\n",
+                         outputConfig.id.c_str());
             continue;
         }
 
         RouteEntry entry;
-        entry.desired = routeConfig;
-        nextRouteIndex_ = std::max(nextRouteIndex_, idSuffix(routeConfig.id, "route-") + 1);
+        entry.desired = outputConfig;
+        nextRouteIndex_ = std::max(nextRouteIndex_, idSuffix(outputConfig.id, "output-") + 1);
 
-        // Clamp/prune what the rest of the daemon can't represent, so a
-        // hand-edited or future-version config can't wedge anything.
-        if (entry.desired.bands.size() > OutputRoute::kMaxBands) {
-            std::fprintf(stderr, "pipeeq: route '%s' has %zu bands; keeping the first %zu\n",
-                         entry.desired.id.c_str(), entry.desired.bands.size(), OutputRoute::kMaxBands);
-            entry.desired.bands.resize(OutputRoute::kMaxBands);
-        }
-        for (auto it = entry.desired.inputGainsDb.begin(); it != entry.desired.inputGainsDb.end();) {
-            it = findInputLocked(it->first) ? std::next(it) : entry.desired.inputGainsDb.erase(it);
-        }
+        // Band clamping, dangling-EQ-reference clearing and pruning sends for
+        // inputs that don't exist all happen in eqcore::sanitize() during the
+        // load, so a hand-edited or migrated config arrives already
+        // representable and this loop doesn't need to repair anything. The
+        // channel list is reshaped to the device's real layout on connect.
 
         routes_.push_back(std::move(entry));
         RouteEntry& added = routes_.back();
 
         if (const DeviceInfo* device = connectableDevice(added, devices)) {
-            connectLocked(added, device->id);
+            connectLocked(added, *device);
         } else {
             std::fprintf(stderr,
-                         "pipeeq: device '%s' (%s) for output '%s' isn't available yet; the output is "
+                         "pipeeq: device '%s' for output '%s' isn't available yet; the output is "
                          "configured and %s\n",
-                         added.desired.deviceName.c_str(),
-                         pairDescription(added.desired.leftChannel, added.desired.rightChannel).c_str(),
-                         added.desired.displayName.c_str(),
+                         added.desired.deviceName.c_str(), added.desired.displayName.c_str(),
                          added.desired.autoConnect ? "will connect when the device appears"
                                                    : "has auto-connect disabled");
         }
@@ -227,96 +227,236 @@ eqcore::AppConfig AudioEngine::snapshotConfig() const {
     std::lock_guard<std::mutex> lock(controlMutex_);
 
     eqcore::AppConfig config;
+    config.version = eqcore::kConfigVersion;
     config.inputs.reserve(inputs_.size());
     for (const auto& in : inputs_) {
-        config.inputs.push_back(eqcore::InputConfig{in->id(), in->displayName()});
+        eqcore::InputConfig input;
+        input.id = in->id();
+        input.displayName = in->displayName();
+        input.positions = in->positions();
+        config.inputs.push_back(std::move(input));
     }
-    config.routes.reserve(routes_.size());
+    config.outputs.reserve(routes_.size());
     for (const auto& entry : routes_) {
-        config.routes.push_back(entry.desired);
+        config.outputs.push_back(entry.desired);
     }
     return config;
 }
 
 void AudioEngine::reconcile() {
-    if (!devicesDirty_.exchange(false)) {
-        return;
-    }
+    const bool devicesChanged = devicesDirty_.exchange(false);
 
     const std::vector<DeviceInfo> devices = listDevices();
 
     std::lock_guard<std::mutex> lock(controlMutex_);
+    if (devicesChanged) {
+        for (auto& entry : routes_) {
+            reconcileEntryLocked(entry, devices);
+        }
+        return;
+    }
+
+    // Even with no device news, a live stream may have just finished
+    // negotiating its format - that flag is set from PipeWire's loop thread and
+    // is unrelated to registry activity, so it has to be picked up every tick.
     for (auto& entry : routes_) {
-        reconcileEntryLocked(entry, devices);
+        if (entry.live && entry.live->consumeFormatChanged()) {
+            republishLocked(entry);
+        }
     }
 }
 
 const DeviceInfo* AudioEngine::connectableDevice(const RouteEntry& entry,
                                                   const std::vector<DeviceInfo>& devices) {
-    const DeviceInfo* device = findDevice(devices, entry.desired.deviceName);
-    if (!device) {
-        return nullptr;
-    }
-    if (!deviceOffersPair(*device, entry.desired.leftChannel, entry.desired.rightChannel)) {
-        return nullptr;
-    }
-    return device;
+    // A device is connectable as soon as it exists. There is no longer any
+    // "does it still offer this output's stereo pair?" question to ask: an
+    // output drives whatever channels the device has, and adoptDeviceLayout()
+    // reshapes its configuration to match on connect.
+    return findDevice(devices, entry.desired.deviceName);
 }
 
 void AudioEngine::reconcileEntryLocked(RouteEntry& entry, const std::vector<DeviceInfo>& devices) {
     const DeviceInfo* device = connectableDevice(entry, devices);
 
+    // A device whose LAYOUT changed under us (a profile switch) needs the
+    // stream renegotiated: the channel count and positions are part of the
+    // negotiated format, and pw_stream can't change them in place. Detected by
+    // comparing against the layout the live stream was created with, so a mere
+    // property refresh reporting the same layout does NOT tear anything down.
+    if (entry.live && device &&
+        layout::needsRenegotiation(entry.livePositions, device->streamPositions())) {
+        std::fprintf(stderr,
+                     "pipeeq: device '%s' changed its channel layout; reconnecting output '%s'\n",
+                     entry.desired.deviceName.c_str(), entry.desired.displayName.c_str());
+        disconnectLocked(entry);
+    }
+
     // A device that reappeared with a different node id (a replug, or a
     // profile switch) leaves the existing stream bound to a node that no
     // longer exists, so treat that as a disconnect too.
     if (entry.live && (!device || device->id != entry.targetNodeId)) {
-        std::fprintf(stderr, "pipeeq: device '%s' (%s) for output '%s' is no longer available; disconnecting\n",
-                     entry.desired.deviceName.c_str(),
-                     pairDescription(entry.desired.leftChannel, entry.desired.rightChannel).c_str(),
-                     entry.desired.displayName.c_str());
+        std::fprintf(stderr,
+                     "pipeeq: device '%s' for output '%s' is no longer available; disconnecting\n",
+                     entry.desired.deviceName.c_str(), entry.desired.displayName.c_str());
         disconnectLocked(entry);
     }
 
     if (!entry.live && device && entry.desired.autoConnect) {
-        std::fprintf(stderr, "pipeeq: device '%s' (%s) is available; connecting output '%s'\n",
-                     entry.desired.deviceName.c_str(),
-                     pairDescription(entry.desired.leftChannel, entry.desired.rightChannel).c_str(),
-                     entry.desired.displayName.c_str());
-        connectLocked(entry, device->id);
+        std::fprintf(stderr, "pipeeq: device '%s' is available; connecting output '%s'\n",
+                     entry.desired.deviceName.c_str(), entry.desired.displayName.c_str());
+        connectLocked(entry, *device);
+    }
+
+    // Format negotiation completed (or changed) since the last pass: the mix
+    // plan and every EQ coefficient must be rebuilt for the layout and sample
+    // rate PipeWire actually chose, not the ones we asked for.
+    if (entry.live && entry.live->consumeFormatChanged()) {
+        republishLocked(entry);
     }
 }
 
-void AudioEngine::connectLocked(RouteEntry& entry, uint32_t targetNodeId) {
+void AudioEngine::connectLocked(RouteEntry& entry, const DeviceInfo& device) {
+    const std::vector<std::string> streamPositions = device.streamPositions();
+
+    // Reshape the configuration to the layout the device actually has, matching
+    // by position name first so a profile flip restores settings rather than
+    // discarding them. New channels arrive with no sends, so previously-unused
+    // outputs come up silent instead of suddenly playing the mix.
+    const AdoptResult adopted = adoptDeviceLayout(entry.desired, streamPositions);
+    entry.liveChannelCount = adopted.liveChannelCount;
+    entry.livePositions = streamPositions;
+
+    if (adopted.appendedChannels > 0) {
+        std::fprintf(stderr,
+                     "pipeeq: output '%s' gained %zu new channel(s) from its device's layout; they "
+                     "start silent (no sends) so nothing unexpected plays out of them\n",
+                     entry.desired.displayName.c_str(), adopted.appendedChannels);
+    }
+    if (adopted.retiredChannels > 0) {
+        std::fprintf(stderr,
+                     "pipeeq: output '%s' has %zu channel(s) its device no longer offers; their "
+                     "settings are kept in case the profile changes back\n",
+                     entry.desired.displayName.c_str(), adopted.retiredChannels);
+    }
+
     pw_thread_loop_lock(loop_);
-    auto route = std::make_unique<OutputRoute>(
-        core_, loop_, entry.desired.id, entry.desired.deviceName, entry.desired.displayName, targetNodeId,
-        kNumChannels, kSampleRateHz, channelPositionFromName(entry.desired.leftChannel),
-        channelPositionFromName(entry.desired.rightChannel));
+    auto stream = std::make_unique<OutputStream>(core_, entry.desired.id, entry.desired.deviceName,
+                                                  entry.desired.displayName, device.id, streamPositions,
+                                                  kSampleRateHz);
     pw_thread_loop_unlock(loop_);
 
-    // Push the desired configuration into the fresh stream. These are plain
-    // snapshot swaps, not PipeWire calls, so they need no loop lock.
-    route->setGainDb(entry.desired.gainDb);
-    route->setMuted(entry.desired.muted);
-    route->setBandCount(entry.desired.bands.size());
-    for (std::size_t i = 0; i < entry.desired.bands.size(); ++i) {
-        route->setBand(i, entry.desired.bands[i]);
+    entry.live = std::move(stream);
+    entry.targetNodeId = device.id;
+
+    // Publishing is a plain snapshot swap, not a PipeWire call, so it needs no
+    // loop lock. The stream emits silence until its format is negotiated, at
+    // which point reconcile() republishes for the real layout and rate.
+    republishLocked(entry);
+}
+
+void AudioEngine::republishLocked(RouteEntry& entry) {
+    if (!entry.live) {
+        return;
     }
-    for (const auto& [inputId, gainDb] : entry.desired.inputGainsDb) {
-        InputSource* input = findInputLocked(inputId);
-        if (!input) {
+
+    // Negotiation may not have completed yet, in which case fall back to the
+    // layout we asked for: the stream is silent until it does, and reconcile()
+    // republishes as soon as param_changed reports the real one.
+    std::vector<std::string> positions = entry.live->negotiatedPositions();
+    if (positions.empty()) {
+        positions = entry.live->requestedPositions();
+    }
+    const uint32_t negotiatedRate = entry.live->negotiatedRateHz();
+    const double sampleRateHz =
+        negotiatedRate != 0 ? static_cast<double>(negotiatedRate) : static_cast<double>(kSampleRateHz);
+
+    const std::size_t channelCount = std::min(positions.size(), kMaxOutputChannels);
+    const eqcore::OutputConfig& desired = entry.desired;
+
+    auto snapshot = std::make_unique<OutputSnapshot>();
+    snapshot->numChannels = static_cast<uint8_t>(channelCount);
+
+    // One coefficient block per EQ instance, shared BY POINTER with every
+    // channel referencing it - so FL and FR on one instance genuinely share one
+    // block, and a gain-only change recomputes no coefficients at all.
+    std::map<std::string, std::shared_ptr<const EqCoeffBlock>> coeffBlocks;
+    for (const eqcore::EqInstanceConfig& instance : desired.eqInstances) {
+        if (instance.bypassed || instance.bands.empty()) {
             continue;
         }
-        if (!route->setInputGainDb(inputId, input->ringBuffer(), gainDb)) {
-            std::fprintf(stderr,
-                         "pipeeq: output '%s' can mix at most %zu inputs; input '%s' is configured but "
-                         "won't be heard\n",
-                         entry.desired.displayName.c_str(), OutputRoute::kMaxInputs, inputId.c_str());
+        auto block = std::make_shared<EqCoeffBlock>();
+        block->bandCount = std::min(instance.bands.size(), kMaxBands);
+        for (std::size_t i = 0; i < block->bandCount; ++i) {
+            block->coeffs[i] = instance.bands[i].toCoeffs(sampleRateHz);
+        }
+        coeffBlocks.emplace(instance.id, std::move(block));
+    }
+
+    for (std::size_t ch = 0; ch < channelCount; ++ch) {
+        ChannelSnapshot& channelSnapshot = snapshot->channels[ch];
+        if (ch >= desired.channels.size()) {
+            // A device channel with no configuration yet: silent, so it can
+            // never play something the user didn't ask for.
+            channelSnapshot.gainLinear = 0.0f;
+            continue;
+        }
+        const eqcore::OutputChannelConfig& channel = desired.channels[ch];
+        // Mute folded into the gain here, so the RT path has no mute branch and
+        // a mute is just another fader target to slew towards.
+        channelSnapshot.gainLinear =
+            channel.muted ? 0.0f : static_cast<float>(std::pow(10.0, channel.gainDb / 20.0));
+        if (const auto it = coeffBlocks.find(channel.eqInstanceId); it != coeffBlocks.end()) {
+            channelSnapshot.eq = it->second;
         }
     }
 
-    entry.live = std::move(route);
-    entry.targetNodeId = targetNodeId;
+    // Which inputs does any channel of this output actually send from? An input
+    // absent from every channel's sends map gets no slot at all, so the RT
+    // thread never reads its ring buffer.
+    const std::vector<uint32_t> outputPositionValues = mix::positionValues(positions);
+    std::size_t slotIndex = 0;
+    for (const auto& input : inputs_) {
+        if (slotIndex >= kMaxInputs) {
+            std::fprintf(stderr,
+                         "pipeeq: output '%s' can mix at most %zu inputs; '%s' is configured but "
+                         "won't be heard\n",
+                         desired.displayName.c_str(), kMaxInputs, input->id().c_str());
+            break;
+        }
+
+        std::vector<mix::SendSpec> sends(channelCount);
+        bool anySend = false;
+        for (std::size_t ch = 0; ch < channelCount; ++ch) {
+            if (ch >= desired.channels.size()) {
+                sends[ch].enabled = false;
+                continue;
+            }
+            const auto& sendsDb = desired.channels[ch].sendsDb;
+            const auto it = sendsDb.find(input->id());
+            if (it == sendsDb.end()) {
+                // Absent is not a 0 dB send: it means this input isn't routed
+                // to this channel at all.
+                sends[ch].enabled = false;
+                continue;
+            }
+            sends[ch].gainDb = it->second;
+            sends[ch].enabled = true;
+            anySend = true;
+        }
+        if (!anySend) {
+            continue;
+        }
+
+        InputMixSlot& slot = snapshot->inputs[slotIndex++];
+        slot.active = true;
+        slot.inputId = input->id();
+        slot.buffer = input->ringBuffer();
+        slot.inputChannels = static_cast<uint16_t>(input->numChannels());
+        mix::buildOutputTaps(outputPositionValues, mix::positionValues(input->positions()), sends,
+                              slot.perChannel, slot.anyTaps);
+    }
+
+    entry.live->publish(std::move(snapshot));
 }
 
 void AudioEngine::disconnectLocked(RouteEntry& entry) {
@@ -334,49 +474,16 @@ std::vector<DeviceInfo> AudioEngine::listDevices() const {
     return devices_;
 }
 
-std::string AudioEngine::addInput(const std::string& displayName) {
-    std::lock_guard<std::mutex> lock(controlMutex_);
-    return addInputLocked("input-" + std::to_string(nextInputIndex_), displayName);
+AudioEngine::RouteEntry* AudioEngine::findEntryLocked(const std::string& outputId) {
+    auto it = std::find_if(routes_.begin(), routes_.end(),
+                            [&](const RouteEntry& e) { return e.desired.id == outputId; });
+    return it == routes_.end() ? nullptr : &*it;
 }
 
-std::string AudioEngine::addInputLocked(std::string inputId, const std::string& displayName) {
-    nextInputIndex_ = std::max(nextInputIndex_, idSuffix(inputId, "input-") + 1);
-
-    pw_thread_loop_lock(loop_);
-    inputs_.push_back(
-        std::make_unique<InputSource>(core_, inputId, displayName, kNumChannels, kSampleRateHz));
-    pw_thread_loop_unlock(loop_);
-
-    return inputId;
-}
-
-void AudioEngine::removeInput(const std::string& inputId) {
-    std::lock_guard<std::mutex> lock(controlMutex_);
-
-    // Drop this input from every route, live and pending alike, so nothing
-    // keeps a stale reference and the persisted config stops mentioning it.
-    for (auto& entry : routes_) {
-        entry.desired.inputGainsDb.erase(inputId);
-        if (entry.live) {
-            entry.live->removeInputSlot(inputId);
-        }
-    }
-
-    pw_thread_loop_lock(loop_);
-    inputs_.erase(std::remove_if(inputs_.begin(), inputs_.end(),
-                                  [&](const std::unique_ptr<InputSource>& in) { return in->id() == inputId; }),
-                  inputs_.end());
-    pw_thread_loop_unlock(loop_);
-}
-
-std::vector<InputInfo> AudioEngine::listInputs() const {
-    std::lock_guard<std::mutex> lock(controlMutex_);
-    std::vector<InputInfo> result;
-    result.reserve(inputs_.size());
-    for (const auto& in : inputs_) {
-        result.push_back(InputInfo{in->id(), in->displayName()});
-    }
-    return result;
+const AudioEngine::RouteEntry* AudioEngine::findEntryLocked(const std::string& outputId) const {
+    auto it = std::find_if(routes_.begin(), routes_.end(),
+                            [&](const RouteEntry& e) { return e.desired.id == outputId; });
+    return it == routes_.end() ? nullptr : &*it;
 }
 
 InputSource* AudioEngine::findInputLocked(const std::string& inputId) const {
@@ -385,43 +492,122 @@ InputSource* AudioEngine::findInputLocked(const std::string& inputId) const {
     return it == inputs_.end() ? nullptr : it->get();
 }
 
-std::string AudioEngine::addRoute(const std::string& deviceName, const std::string& displayName,
-                                   const std::string& leftChannel, const std::string& rightChannel,
-                                   double gainDb) {
+std::string AudioEngine::addInput(const std::string& displayName,
+                                  const std::vector<std::string>& positions) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    return addInputLocked("input-" + std::to_string(nextInputIndex_), displayName, positions);
+}
+
+std::string AudioEngine::addInputLocked(std::string inputId, const std::string& displayName,
+                                         const std::vector<std::string>& positions) {
+    std::vector<std::string> layoutNames = positions;
+    if (layoutNames.empty()) {
+        layoutNames = layout::defaultPositionsFor(kDefaultInputChannels);
+    }
+    if (layoutNames.size() > kMaxInputChannels) {
+        std::fprintf(stderr,
+                     "pipeeq: input '%s' asked for %zu channels; PipeEQ mixes at most %zu, so the "
+                     "layout is truncated\n",
+                     displayName.c_str(), layoutNames.size(), kMaxInputChannels);
+        layoutNames.resize(kMaxInputChannels);
+    }
+
+    nextInputIndex_ = std::max(nextInputIndex_, idSuffix(inputId, "input-") + 1);
+
+    pw_thread_loop_lock(loop_);
+    inputs_.push_back(std::make_unique<InputSource>(core_, inputId, displayName, layoutNames,
+                                                     kSampleRateHz));
+    pw_thread_loop_unlock(loop_);
+
+    return inputId;
+}
+
+void AudioEngine::removeInput(const std::string& inputId) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+
+    // Drop this input from every channel of every output, live and pending
+    // alike, so nothing keeps a stale reference and the persisted config stops
+    // mentioning it.
+    for (auto& entry : routes_) {
+        for (auto& channel : entry.desired.channels) {
+            channel.sendsDb.erase(inputId);
+        }
+        republishLocked(entry);
+    }
+
+    pw_thread_loop_lock(loop_);
+    inputs_.erase(std::remove_if(inputs_.begin(), inputs_.end(),
+                                  [&](const std::unique_ptr<InputSource>& in) {
+                                      return in->id() == inputId;
+                                  }),
+                   inputs_.end());
+    pw_thread_loop_unlock(loop_);
+}
+
+bool AudioEngine::setInputDisplayName(const std::string& inputId, const std::string& displayName) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    InputSource* input = findInputLocked(inputId);
+    if (!input) {
+        return false;
+    }
+    input->setDisplayName(displayName);
+    return true;
+}
+
+std::vector<InputInfo> AudioEngine::listInputs() const {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    std::vector<InputInfo> result;
+    result.reserve(inputs_.size());
+    for (const auto& in : inputs_) {
+        result.push_back(InputInfo{in->id(), in->displayName(), in->positions()});
+    }
+    return result;
+}
+
+// ------------------------------------------------------------------- outputs --
+
+std::string AudioEngine::addOutput(const std::string& deviceName, const std::string& displayName) {
     const std::vector<DeviceInfo> devices = listDevices();
 
     std::lock_guard<std::mutex> lock(controlMutex_);
 
     RouteEntry entry;
-    entry.desired.id = "route-" + std::to_string(nextRouteIndex_++);
+    entry.desired.id = "output-" + std::to_string(nextRouteIndex_++);
     entry.desired.deviceName = deviceName;
     entry.desired.displayName = displayName.empty() ? deviceName : displayName;
-    entry.desired.leftChannel = leftChannel;
-    entry.desired.rightChannel = rightChannel;
-    entry.desired.gainDb = gainDb;
 
-    // New outputs hear everything by default (matches pre-mixer behavior).
-    for (const auto& in : inputs_) {
-        entry.desired.inputGainsDb[in->id()] = 0.0;
+    // Seed the channel list from the device if we can see it, so a brand-new
+    // output already has its strips before it connects. Otherwise leave it
+    // empty; connectLocked() adopts the real layout when the device shows up.
+    if (const DeviceInfo* device = findDevice(devices, deviceName)) {
+        adoptDeviceLayout(entry.desired, device->streamPositions());
+    }
+
+    // New outputs hear everything at unity, which is the behaviour outputs have
+    // always had. (New INPUTS are the opposite - silent on every existing
+    // output - so adding an input can't disturb a tuned one.)
+    for (auto& channel : entry.desired.channels) {
+        for (const auto& in : inputs_) {
+            channel.sendsDb[in->id()] = 0.0;
+        }
     }
 
     routes_.push_back(std::move(entry));
     RouteEntry& added = routes_.back();
 
-    // A device that isn't here yet is not an error: the route is configured
+    // A device that isn't here yet is not an error: the output is configured
     // now and connects when the hardware appears.
     if (const DeviceInfo* device = connectableDevice(added, devices)) {
-        connectLocked(added, device->id);
+        connectLocked(added, *device);
     }
 
     return added.desired.id;
 }
 
-void AudioEngine::removeRoute(const std::string& routeId) {
+void AudioEngine::removeOutput(const std::string& outputId) {
     std::lock_guard<std::mutex> lock(controlMutex_);
-
     auto it = std::find_if(routes_.begin(), routes_.end(),
-                            [&](const RouteEntry& e) { return e.desired.id == routeId; });
+                            [&](const RouteEntry& e) { return e.desired.id == outputId; });
     if (it == routes_.end()) {
         return;
     }
@@ -429,94 +615,40 @@ void AudioEngine::removeRoute(const std::string& routeId) {
     routes_.erase(it);
 }
 
-std::vector<RouteInfo> AudioEngine::listRoutes() const {
+std::vector<OutputInfo> AudioEngine::listOutputs() const {
     std::lock_guard<std::mutex> lock(controlMutex_);
-    std::vector<RouteInfo> result;
+    std::vector<OutputInfo> result;
     result.reserve(routes_.size());
     for (const auto& entry : routes_) {
-        result.push_back(RouteInfo{entry.desired.id, entry.desired.deviceName, entry.desired.displayName,
-                                    entry.desired.gainDb, entry.desired.muted, entry.desired.bands.size(),
-                                    entry.live != nullptr, entry.desired.autoConnect,
-                                    entry.desired.leftChannel, entry.desired.rightChannel});
+        OutputInfo info;
+        info.id = entry.desired.id;
+        info.deviceName = entry.desired.deviceName;
+        info.displayName = entry.desired.displayName;
+        info.connected = entry.live != nullptr;
+        info.autoConnect = entry.desired.autoConnect;
+        info.channelCount = entry.desired.channels.size();
+        info.liveChannelCount = entry.live ? entry.liveChannelCount : 0;
+        info.sampleRateHz = entry.live ? entry.live->negotiatedRateHz() : 0;
+        result.push_back(std::move(info));
     }
     return result;
 }
 
-AudioEngine::RouteEntry* AudioEngine::findEntryLocked(const std::string& routeId) {
-    auto it = std::find_if(routes_.begin(), routes_.end(),
-                            [&](const RouteEntry& e) { return e.desired.id == routeId; });
-    return it == routes_.end() ? nullptr : &*it;
-}
-
-const AudioEngine::RouteEntry* AudioEngine::findEntryLocked(const std::string& routeId) const {
-    auto it = std::find_if(routes_.begin(), routes_.end(),
-                            [&](const RouteEntry& e) { return e.desired.id == routeId; });
-    return it == routes_.end() ? nullptr : &*it;
-}
-
-bool AudioEngine::setRouteGain(const std::string& routeId, double gainDb) {
+bool AudioEngine::setOutputDisplayName(const std::string& outputId, const std::string& displayName) {
     std::lock_guard<std::mutex> lock(controlMutex_);
-    RouteEntry* entry = findEntryLocked(routeId);
+    RouteEntry* entry = findEntryLocked(outputId);
     if (!entry) {
         return false;
     }
-    entry->desired.gainDb = gainDb;
-    if (entry->live) {
-        entry->live->setGainDb(gainDb);
-    }
+    entry->desired.displayName = displayName.empty() ? entry->desired.deviceName : displayName;
     return true;
 }
 
-bool AudioEngine::setRouteMuted(const std::string& routeId, bool muted) {
-    std::lock_guard<std::mutex> lock(controlMutex_);
-    RouteEntry* entry = findEntryLocked(routeId);
-    if (!entry) {
-        return false;
-    }
-    entry->desired.muted = muted;
-    if (entry->live) {
-        entry->live->setMuted(muted);
-    }
-    return true;
-}
-
-bool AudioEngine::setRouteBandCount(const std::string& routeId, std::size_t count) {
-    std::lock_guard<std::mutex> lock(controlMutex_);
-    RouteEntry* entry = findEntryLocked(routeId);
-    if (!entry) {
-        return false;
-    }
-    entry->desired.bands.resize(std::min(count, OutputRoute::kMaxBands));
-    if (entry->live) {
-        entry->live->setBandCount(entry->desired.bands.size());
-    }
-    return true;
-}
-
-bool AudioEngine::setRouteBand(const std::string& routeId, std::size_t index, const eqcore::EqBand& band) {
-    std::lock_guard<std::mutex> lock(controlMutex_);
-    RouteEntry* entry = findEntryLocked(routeId);
-    if (!entry || index >= entry->desired.bands.size()) {
-        return false;
-    }
-    entry->desired.bands[index] = band;
-    if (entry->live) {
-        entry->live->setBand(index, band);
-    }
-    return true;
-}
-
-std::vector<eqcore::EqBand> AudioEngine::getRouteBands(const std::string& routeId) const {
-    std::lock_guard<std::mutex> lock(controlMutex_);
-    const RouteEntry* entry = findEntryLocked(routeId);
-    return entry ? entry->desired.bands : std::vector<eqcore::EqBand>{};
-}
-
-bool AudioEngine::setRouteAutoConnect(const std::string& routeId, bool autoConnect) {
+bool AudioEngine::setOutputAutoConnect(const std::string& outputId, bool autoConnect) {
     const std::vector<DeviceInfo> devices = listDevices();
 
     std::lock_guard<std::mutex> lock(controlMutex_);
-    RouteEntry* entry = findEntryLocked(routeId);
+    RouteEntry* entry = findEntryLocked(outputId);
     if (!entry) {
         return false;
     }
@@ -526,84 +658,570 @@ bool AudioEngine::setRouteAutoConnect(const std::string& routeId, bool autoConne
     // turning it off deliberately leaves a live connection running.
     if (autoConnect && !entry->live) {
         if (const DeviceInfo* device = connectableDevice(*entry, devices)) {
-            connectLocked(*entry, device->id);
+            connectLocked(*entry, *device);
         }
     }
     return true;
 }
 
-bool AudioEngine::setRouteChannels(const std::string& routeId, const std::string& leftChannel,
-                                    const std::string& rightChannel) {
-    const std::vector<DeviceInfo> devices = listDevices();
+// ------------------------------------------------------------------ channels --
 
+std::vector<ChannelInfo> AudioEngine::getOutputChannels(const std::string& outputId) const {
     std::lock_guard<std::mutex> lock(controlMutex_);
-    RouteEntry* entry = findEntryLocked(routeId);
-    if (!entry) {
-        return false;
-    }
-    if (entry->desired.leftChannel == leftChannel && entry->desired.rightChannel == rightChannel) {
-        return true;
-    }
-
-    entry->desired.leftChannel = leftChannel;
-    entry->desired.rightChannel = rightChannel;
-
-    // The pair is part of the stream's negotiated format, so it can only
-    // change by reconnecting. Everything else about the route lives in
-    // `desired` and is reapplied by connectLocked().
-    const bool wasLive = entry->live != nullptr;
-    disconnectLocked(*entry);
-    if (wasLive || entry->desired.autoConnect) {
-        if (const DeviceInfo* device = connectableDevice(*entry, devices)) {
-            connectLocked(*entry, device->id);
-        }
-    }
-    return true;
-}
-
-bool AudioEngine::setRouteInputGain(const std::string& routeId, const std::string& inputId, double gainDb) {
-    std::lock_guard<std::mutex> lock(controlMutex_);
-    RouteEntry* entry = findEntryLocked(routeId);
-    InputSource* input = findInputLocked(inputId);
-    if (!entry || !input) {
-        return false;
-    }
-
-    // Don't record a level the route can't actually honor, so the persisted
-    // config never promises a mix that won't come back after a restart.
-    if (entry->live && !entry->live->setInputGainDb(inputId, input->ringBuffer(), gainDb)) {
-        return false;
-    }
-    if (!entry->live && !entry->desired.inputGainsDb.count(inputId) &&
-        entry->desired.inputGainsDb.size() >= OutputRoute::kMaxInputs) {
-        return false;
-    }
-
-    entry->desired.inputGainsDb[inputId] = gainDb;
-    return true;
-}
-
-bool AudioEngine::removeRouteInput(const std::string& routeId, const std::string& inputId) {
-    std::lock_guard<std::mutex> lock(controlMutex_);
-    RouteEntry* entry = findEntryLocked(routeId);
-    if (!entry) {
-        return false;
-    }
-    entry->desired.inputGainsDb.erase(inputId);
-    if (entry->live) {
-        entry->live->removeInputSlot(inputId);
-    }
-    return true;
-}
-
-std::vector<std::pair<std::string, double>> AudioEngine::getRouteInputGains(const std::string& routeId) const {
-    std::lock_guard<std::mutex> lock(controlMutex_);
-    const RouteEntry* entry = findEntryLocked(routeId);
+    const RouteEntry* entry = findEntryLocked(outputId);
     if (!entry) {
         return {};
     }
-    return std::vector<std::pair<std::string, double>>(entry->desired.inputGainsDb.begin(),
-                                                        entry->desired.inputGainsDb.end());
+
+    std::vector<ChannelInfo> result;
+    result.reserve(entry->desired.channels.size());
+    for (std::size_t i = 0; i < entry->desired.channels.size(); ++i) {
+        const eqcore::OutputChannelConfig& channel = entry->desired.channels[i];
+        ChannelInfo info;
+        info.index = i;
+        info.position = channel.position;
+        info.displayName = channel.displayName;
+        info.gainDb = channel.gainDb;
+        info.muted = channel.muted;
+        info.eqInstanceId = channel.eqInstanceId;
+        if (const eqcore::LinkGroupConfig* group = entry->desired.groupOfChannel(i)) {
+            info.groupId = group->id;
+        }
+        info.driven = entry->live != nullptr && i < entry->liveChannelCount;
+        result.push_back(std::move(info));
+    }
+    return result;
+}
+
+// Resolves (outputId, channelIndex) and returns every channel index a set must
+// write: the whole link group, or just this one when ungrouped. Empty on an
+// unknown output or an out-of-range index.
+std::vector<std::size_t> AudioEngine::linkedChannelsLocked(RouteEntry& entry,
+                                                            std::size_t channelIndex) const {
+    if (channelIndex >= entry.desired.channels.size()) {
+        return {};
+    }
+    return entry.desired.linkedChannels(channelIndex);
+}
+
+bool AudioEngine::setChannelGain(const std::string& outputId, std::size_t channelIndex, double gainDb) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return false;
+    }
+    const std::vector<std::size_t> targets = linkedChannelsLocked(*entry, channelIndex);
+    if (targets.empty()) {
+        return false;
+    }
+    for (std::size_t index : targets) {
+        entry->desired.channels[index].gainDb = gainDb;
+    }
+    republishLocked(*entry);
+    return true;
+}
+
+bool AudioEngine::setChannelMuted(const std::string& outputId, std::size_t channelIndex, bool muted) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return false;
+    }
+    const std::vector<std::size_t> targets = linkedChannelsLocked(*entry, channelIndex);
+    if (targets.empty()) {
+        return false;
+    }
+    for (std::size_t index : targets) {
+        entry->desired.channels[index].muted = muted;
+    }
+    republishLocked(*entry);
+    return true;
+}
+
+bool AudioEngine::setChannelPosition(const std::string& outputId, std::size_t channelIndex,
+                                      const std::string& position) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry || channelIndex >= entry->desired.channels.size()) {
+        return false;
+    }
+    // NOT linked, and NOT a reconnect: the stream carries the device's own
+    // layout regardless, so this only changes which input channels the mix
+    // planner matches into this one channel.
+    entry->desired.channels[channelIndex].position = position;
+    republishLocked(*entry);
+    return true;
+}
+
+bool AudioEngine::setChannelDisplayName(const std::string& outputId, std::size_t channelIndex,
+                                         const std::string& displayName) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry || channelIndex >= entry->desired.channels.size()) {
+        return false;
+    }
+    entry->desired.channels[channelIndex].displayName = displayName;
+    return true;
+}
+
+bool AudioEngine::setChannelEqInstance(const std::string& outputId, std::size_t channelIndex,
+                                        const std::string& eqInstanceId) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry || channelIndex >= entry->desired.channels.size()) {
+        return false;
+    }
+    if (!eqInstanceId.empty() && !entry->desired.findEqInstance(eqInstanceId)) {
+        return false;
+    }
+    // Deliberately NOT linked across the group: giving FL and FR different EQs
+    // is exactly what per-channel EQ is for.
+    entry->desired.channels[channelIndex].eqInstanceId = eqInstanceId;
+    republishLocked(*entry);
+    return true;
+}
+
+// ------------------------------------------------------------------------ EQ --
+
+std::vector<EqInstanceInfo> AudioEngine::listEqInstances(const std::string& outputId) const {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    const RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return {};
+    }
+
+    std::vector<EqInstanceInfo> result;
+    result.reserve(entry->desired.eqInstances.size());
+    for (const eqcore::EqInstanceConfig& instance : entry->desired.eqInstances) {
+        EqInstanceInfo info;
+        info.id = instance.id;
+        info.displayName = instance.displayName;
+        info.bandCount = instance.bands.size();
+        info.bypassed = instance.bypassed;
+        for (const eqcore::OutputChannelConfig& channel : entry->desired.channels) {
+            if (channel.eqInstanceId == instance.id) {
+                ++info.channelCount;
+            }
+        }
+        result.push_back(std::move(info));
+    }
+    return result;
+}
+
+std::string AudioEngine::addEqInstance(const std::string& outputId, const std::string& displayName) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return {};
+    }
+    eqcore::EqInstanceConfig instance;
+    instance.id = entry->desired.nextEqInstanceId();
+    instance.displayName = displayName.empty() ? instance.id : displayName;
+    entry->desired.eqInstances.push_back(std::move(instance));
+    return entry->desired.eqInstances.back().id;
+}
+
+bool AudioEngine::removeEqInstance(const std::string& outputId, const std::string& eqInstanceId) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return false;
+    }
+    auto& instances = entry->desired.eqInstances;
+    auto it = std::find_if(instances.begin(), instances.end(),
+                            [&](const eqcore::EqInstanceConfig& i) { return i.id == eqInstanceId; });
+    if (it == instances.end()) {
+        return false;
+    }
+    instances.erase(it);
+
+    // Any channel that referenced it is left with no EQ rather than a dangling
+    // reference - flat, which is the only safe interpretation.
+    for (auto& channel : entry->desired.channels) {
+        if (channel.eqInstanceId == eqInstanceId) {
+            channel.eqInstanceId.clear();
+        }
+    }
+    republishLocked(*entry);
+    return true;
+}
+
+bool AudioEngine::setEqInstanceName(const std::string& outputId, const std::string& eqInstanceId,
+                                     const std::string& displayName) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return false;
+    }
+    eqcore::EqInstanceConfig* instance = entry->desired.findEqInstance(eqInstanceId);
+    if (!instance) {
+        return false;
+    }
+    instance->displayName = displayName.empty() ? instance->id : displayName;
+    return true;
+}
+
+bool AudioEngine::setEqBypassed(const std::string& outputId, const std::string& eqInstanceId,
+                                 bool bypassed) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return false;
+    }
+    eqcore::EqInstanceConfig* instance = entry->desired.findEqInstance(eqInstanceId);
+    if (!instance) {
+        return false;
+    }
+    instance->bypassed = bypassed;
+    republishLocked(*entry);
+    return true;
+}
+
+bool AudioEngine::setEqBandCount(const std::string& outputId, const std::string& eqInstanceId,
+                                  std::size_t count) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return false;
+    }
+    eqcore::EqInstanceConfig* instance = entry->desired.findEqInstance(eqInstanceId);
+    if (!instance) {
+        return false;
+    }
+    instance->bands.resize(std::min(count, eqcore::kMaxBands));
+    republishLocked(*entry);
+    return true;
+}
+
+bool AudioEngine::setEqBand(const std::string& outputId, const std::string& eqInstanceId,
+                             std::size_t index, const eqcore::EqBand& band) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return false;
+    }
+    eqcore::EqInstanceConfig* instance = entry->desired.findEqInstance(eqInstanceId);
+    if (!instance || index >= instance->bands.size()) {
+        return false;
+    }
+    instance->bands[index] = band;
+    republishLocked(*entry);
+    return true;
+}
+
+std::vector<eqcore::EqBand> AudioEngine::getEqBands(const std::string& outputId,
+                                                     const std::string& eqInstanceId) const {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    const RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return {};
+    }
+    const eqcore::EqInstanceConfig* instance = entry->desired.findEqInstance(eqInstanceId);
+    return instance ? instance->bands : std::vector<eqcore::EqBand>{};
+}
+
+std::string AudioEngine::copyEqInstance(const std::string& sourceOutputId,
+                                         const std::string& eqInstanceId,
+                                         const std::string& targetOutputId) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    const RouteEntry* source = findEntryLocked(sourceOutputId);
+    RouteEntry* target = findEntryLocked(targetOutputId);
+    if (!source || !target) {
+        return {};
+    }
+    const eqcore::EqInstanceConfig* instance = source->desired.findEqInstance(eqInstanceId);
+    if (!instance) {
+        return {};
+    }
+
+    eqcore::EqInstanceConfig copy = *instance;
+    copy.id = target->desired.nextEqInstanceId();
+    target->desired.eqInstances.push_back(std::move(copy));
+    republishLocked(*target);
+    return target->desired.eqInstances.back().id;
+}
+
+// The channel-scoped convenience forms. These exist so a caller can edit a
+// channel's EQ without knowing that instances exist - the band-setting forms
+// create one on demand and assign it.
+eqcore::EqInstanceConfig& AudioEngine::channelEqInstanceLocked(RouteEntry& entry,
+                                                                std::size_t channelIndex) {
+    eqcore::OutputChannelConfig& channel = entry.desired.channels[channelIndex];
+    if (eqcore::EqInstanceConfig* existing = entry.desired.findEqInstance(channel.eqInstanceId)) {
+        return *existing;
+    }
+
+    eqcore::EqInstanceConfig instance;
+    instance.id = entry.desired.nextEqInstanceId();
+    instance.displayName = channel.position.empty() ? instance.id : channel.position;
+    entry.desired.eqInstances.push_back(std::move(instance));
+    eqcore::EqInstanceConfig& added = entry.desired.eqInstances.back();
+    channel.eqInstanceId = added.id;
+    return added;
+}
+
+std::vector<eqcore::EqBand> AudioEngine::getChannelEqBands(const std::string& outputId,
+                                                            std::size_t channelIndex) const {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    const RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry || channelIndex >= entry->desired.channels.size()) {
+        return {};
+    }
+    const eqcore::EqInstanceConfig* instance =
+        entry->desired.findEqInstance(entry->desired.channels[channelIndex].eqInstanceId);
+    return instance ? instance->bands : std::vector<eqcore::EqBand>{};
+}
+
+bool AudioEngine::setChannelEqBandCount(const std::string& outputId, std::size_t channelIndex,
+                                         std::size_t count) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry || channelIndex >= entry->desired.channels.size()) {
+        return false;
+    }
+    eqcore::EqInstanceConfig& instance = channelEqInstanceLocked(*entry, channelIndex);
+    instance.bands.resize(std::min(count, eqcore::kMaxBands));
+    republishLocked(*entry);
+    return true;
+}
+
+bool AudioEngine::setChannelEqBand(const std::string& outputId, std::size_t channelIndex,
+                                    std::size_t index, const eqcore::EqBand& band) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry || channelIndex >= entry->desired.channels.size()) {
+        return false;
+    }
+    eqcore::EqInstanceConfig& instance = channelEqInstanceLocked(*entry, channelIndex);
+    if (index >= instance.bands.size()) {
+        return false;
+    }
+    instance.bands[index] = band;
+    republishLocked(*entry);
+    return true;
+}
+
+// -------------------------------------------------------------- link groups --
+
+std::vector<LinkGroupInfo> AudioEngine::listLinkGroups(const std::string& outputId) const {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    const RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return {};
+    }
+    std::vector<LinkGroupInfo> result;
+    result.reserve(entry->desired.linkGroups.size());
+    for (const eqcore::LinkGroupConfig& group : entry->desired.linkGroups) {
+        result.push_back(LinkGroupInfo{group.id, group.displayName, group.channelIndices});
+    }
+    return result;
+}
+
+// Applies the lowest-index member's gain/mute/sends to every other member, so
+// a freshly linked group is never ambiguous about which side won.
+void AudioEngine::adoptGroupLeaderLocked(RouteEntry& entry,
+                                          const std::vector<uint32_t>& channelIndices) {
+    if (channelIndices.empty()) {
+        return;
+    }
+    const std::size_t leader = *std::min_element(channelIndices.begin(), channelIndices.end());
+    if (leader >= entry.desired.channels.size()) {
+        return;
+    }
+    const eqcore::OutputChannelConfig source = entry.desired.channels[leader];
+    for (uint32_t index : channelIndices) {
+        if (index >= entry.desired.channels.size() || index == leader) {
+            continue;
+        }
+        eqcore::OutputChannelConfig& target = entry.desired.channels[index];
+        target.gainDb = source.gainDb;
+        target.muted = source.muted;
+        target.sendsDb = source.sendsDb;
+    }
+}
+
+std::string AudioEngine::createLinkGroup(const std::string& outputId,
+                                          const std::vector<uint32_t>& channelIndices,
+                                          const std::string& displayName) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return {};
+    }
+
+    std::vector<uint32_t> members = channelIndices;
+    std::sort(members.begin(), members.end());
+    members.erase(std::unique(members.begin(), members.end()), members.end());
+    if (members.size() < 2) {
+        return {};
+    }
+    for (uint32_t index : members) {
+        if (index >= entry->desired.channels.size()) {
+            return {};
+        }
+        // A channel in two groups has no coherent meaning: a set on it would
+        // have to write two different member sets.
+        if (entry->desired.groupOfChannel(index)) {
+            return {};
+        }
+    }
+
+    eqcore::LinkGroupConfig group;
+    group.id = entry->desired.nextLinkGroupId();
+    group.channelIndices = members;
+    if (displayName.empty()) {
+        for (uint32_t index : members) {
+            const std::string& position = entry->desired.channels[index].position;
+            group.displayName += group.displayName.empty() ? position : ("/" + position);
+        }
+    } else {
+        group.displayName = displayName;
+    }
+    entry->desired.linkGroups.push_back(std::move(group));
+
+    adoptGroupLeaderLocked(*entry, members);
+    republishLocked(*entry);
+    return entry->desired.linkGroups.back().id;
+}
+
+bool AudioEngine::removeLinkGroup(const std::string& outputId, const std::string& groupId) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return false;
+    }
+    auto& groups = entry->desired.linkGroups;
+    auto it = std::find_if(groups.begin(), groups.end(),
+                            [&](const eqcore::LinkGroupConfig& g) { return g.id == groupId; });
+    if (it == groups.end()) {
+        return false;
+    }
+    // Unlinking keeps every channel's current values; they simply stop moving
+    // together from now on.
+    groups.erase(it);
+    return true;
+}
+
+bool AudioEngine::setLinkGroupChannels(const std::string& outputId, const std::string& groupId,
+                                        const std::vector<uint32_t>& channelIndices) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return false;
+    }
+    eqcore::LinkGroupConfig* group = entry->desired.findLinkGroup(groupId);
+    if (!group) {
+        return false;
+    }
+
+    std::vector<uint32_t> members = channelIndices;
+    std::sort(members.begin(), members.end());
+    members.erase(std::unique(members.begin(), members.end()), members.end());
+    if (members.size() < 2) {
+        return false;
+    }
+    for (uint32_t index : members) {
+        if (index >= entry->desired.channels.size()) {
+            return false;
+        }
+        const eqcore::LinkGroupConfig* owner = entry->desired.groupOfChannel(index);
+        if (owner && owner->id != groupId) {
+            return false;
+        }
+    }
+
+    group->channelIndices = members;
+    adoptGroupLeaderLocked(*entry, members);
+    republishLocked(*entry);
+    return true;
+}
+
+// -------------------------------------------------------------------- sends --
+
+std::vector<SendInfo> AudioEngine::getSends(const std::string& outputId) const {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    const RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return {};
+    }
+    std::vector<SendInfo> result;
+    for (std::size_t i = 0; i < entry->desired.channels.size(); ++i) {
+        for (const auto& [inputId, gainDb] : entry->desired.channels[i].sendsDb) {
+            result.push_back(SendInfo{i, inputId, gainDb});
+        }
+    }
+    return result;
+}
+
+bool AudioEngine::setSend(const std::string& outputId, std::size_t channelIndex,
+                           const std::string& inputId, double gainDb) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry || !findInputLocked(inputId)) {
+        return false;
+    }
+    const std::vector<std::size_t> targets = linkedChannelsLocked(*entry, channelIndex);
+    if (targets.empty()) {
+        return false;
+    }
+
+    // The send pool is per output, so count the distinct inputs any channel
+    // sends from. Refusing here keeps the persisted config from promising a mix
+    // that won't come back after a restart.
+    if (!routedInputsLocked(*entry).count(inputId) &&
+        routedInputsLocked(*entry).size() >= kMaxInputs) {
+        return false;
+    }
+
+    for (std::size_t index : targets) {
+        entry->desired.channels[index].sendsDb[inputId] = gainDb;
+    }
+    republishLocked(*entry);
+    return true;
+}
+
+bool AudioEngine::removeSend(const std::string& outputId, std::size_t channelIndex,
+                              const std::string& inputId) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry) {
+        return false;
+    }
+    const std::vector<std::size_t> targets = linkedChannelsLocked(*entry, channelIndex);
+    if (targets.empty()) {
+        return false;
+    }
+    for (std::size_t index : targets) {
+        entry->desired.channels[index].sendsDb.erase(inputId);
+    }
+    republishLocked(*entry);
+    return true;
+}
+
+std::set<std::string> AudioEngine::routedInputsLocked(const RouteEntry& entry) const {
+    std::set<std::string> ids;
+    for (const auto& channel : entry.desired.channels) {
+        for (const auto& [inputId, gainDb] : channel.sendsDb) {
+            ids.insert(inputId);
+        }
+    }
+    return ids;
+}
+
+// ----------------------------------------------------------------- metering --
+
+std::vector<float> AudioEngine::takeOutputPeaks(const std::string& outputId) {
+    std::lock_guard<std::mutex> lock(controlMutex_);
+    RouteEntry* entry = findEntryLocked(outputId);
+    if (!entry || !entry->live) {
+        return {};
+    }
+    const std::size_t count = std::min(entry->liveChannelCount, kMaxOutputChannels);
+    std::vector<float> peaks(count, 0.0f);
+    for (std::size_t i = 0; i < count; ++i) {
+        peaks[i] = entry->live->takeChannelPeak(i);
+    }
+    return peaks;
 }
 
 void AudioEngine::onRegistryGlobal(void* userdata, uint32_t id, uint32_t /*permissions*/, const char* type,
@@ -638,7 +1256,6 @@ void AudioEngine::onRegistryGlobal(void* userdata, uint32_t id, uint32_t /*permi
     // device starts out with no known layout (one "device default" pair) and
     // is filled in by onNodeInfo() once the bind below reports back.
     DeviceInfo device{id, nodeName, description ? description : nodeName, {}, {}};
-    device.pairs = stereoPairsFor(device.positions);
 
     {
         std::lock_guard<std::mutex> lock(self->devicesMutex_);
@@ -650,6 +1267,7 @@ void AudioEngine::onRegistryGlobal(void* userdata, uint32_t id, uint32_t /*permi
     // and taking controlMutex_ would invert the lock order the control
     // threads use. reconcile() picks this up from the main thread instead.
     self->devicesDirty_.store(true, std::memory_order_release);
+    self->devicesChangedForClients_.store(true, std::memory_order_release);
 }
 
 void AudioEngine::bindNodeOnLoop(uint32_t id) {
@@ -683,35 +1301,51 @@ void AudioEngine::onNodeInfo(void* userdata, const pw_node_info* info) {
     // A node emits info repeatedly - on state and param changes as well as
     // the initial description - and only includes props when the PROPS bit is
     // set. Acting on the others would read a missing audio.position as "this
-    // device has no channel layout" and wipe the pairs we already know about,
+    // device has no channel layout" and wipe the layout we already know about,
     // which is exactly what happened before this check existed.
     if (!info || !(info->change_mask & PW_NODE_CHANGE_MASK_PROPS) || !info->props) {
         return;
     }
 
-    // e.g. "[ FL, FR, RL, RR ]" for a 4.0 interface. This also fires again
-    // when a device's profile changes, so switching a card to a different
-    // layout updates the offered pairs - and reconcile() then disconnects any
-    // output whose pair no longer exists rather than leaving it playing into
-    // channels the device stopped having.
+    // e.g. "[ FL, FR, RL, RR ]" for a 4.0 interface. This also fires again when
+    // a device's profile changes, so switching a card to a different layout
+    // updates what we know - and reconcile() then renegotiates the stream for
+    // the new layout rather than leaving it playing into channels the device
+    // stopped having.
     const std::vector<std::string> positions =
-        parseChannelPositions(spa_dict_lookup(info->props, SPA_KEY_AUDIO_POSITION));
+        layout::parseChannelPositions(spa_dict_lookup(info->props, SPA_KEY_AUDIO_POSITION));
+
+    // The channel COUNT matters independently of the positions: a device can
+    // report how many channels it has while advertising no layout for them
+    // (a Focusrite in its "Pro Audio" profile, for instance), and that is
+    // exactly the case that needs a substituted AUX layout. The previous
+    // engine never read this at all - it inferred the count from the position
+    // list, so a layout-less device looked like it had no channels.
+    uint32_t channelCount = 0;
+    if (const char* channelsText = spa_dict_lookup(info->props, SPA_KEY_AUDIO_CHANNELS)) {
+        channelCount = static_cast<uint32_t>(std::strtoul(channelsText, nullptr, 10));
+    }
+    if (channelCount == 0) {
+        channelCount = static_cast<uint32_t>(positions.size());
+    }
 
     AudioEngine* self = bound->engine;
     bool changed = false;
     {
         std::lock_guard<std::mutex> lock(self->devicesMutex_);
         for (auto& device : self->devices_) {
-            if (device.id != bound->id || device.positions == positions) {
+            if (device.id != bound->id ||
+                (device.positions == positions && device.channelCount == channelCount)) {
                 continue;
             }
             device.positions = positions;
-            device.pairs = stereoPairsFor(positions);
+            device.channelCount = channelCount;
             changed = true;
         }
     }
     if (changed) {
         self->devicesDirty_.store(true, std::memory_order_release);
+    self->devicesChangedForClients_.store(true, std::memory_order_release);
     }
 }
 
@@ -729,6 +1363,7 @@ void AudioEngine::onRegistryGlobalRemove(void* userdata, uint32_t id) {
     }
     if (removed) {
         self->devicesDirty_.store(true, std::memory_order_release);
+    self->devicesChangedForClients_.store(true, std::memory_order_release);
     }
 }
 

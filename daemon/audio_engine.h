@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -10,10 +11,10 @@
 
 #include <pipewire/pipewire.h>
 
-#include "channel_pair.h"
 #include "input_source.h"
-#include "output_route.h"
-#include "route_config.h"
+#include "output_stream.h"
+#include "rt_limits.h"
+#include "app_config.h"
 
 namespace pipeeq {
 
@@ -21,16 +22,79 @@ struct DeviceInfo {
     uint32_t id;
     std::string nodeName;
     std::string description;
-    // The device's channel layout as SPA short names ("FL", "FR", "RL", ...),
-    // and the stereo pairs derived from it. A 4.0 interface offers two, each
-    // of which can host its own independent output.
+    // The device's channel layout as SPA short names ("FL", "FR", "RL", ...).
+    // Empty when the device advertises none, in which case streamPositions()
+    // substitutes a conventional layout for its channel count.
     std::vector<std::string> positions;
-    std::vector<ChannelPair> pairs;
+    // From the node's audio.channels property. positions may be empty while
+    // this is not, which is exactly the case that needs a substitute layout.
+    uint32_t channelCount = 0;
+
+    // The layout an output stream should negotiate for this device: what the
+    // device says, or the conventional layout for its channel count.
+    std::vector<std::string> streamPositions() const;
 };
 
 struct InputInfo {
     std::string id;
     std::string displayName;
+    // The virtual sink's declared channel layout, SPA short names.
+    std::vector<std::string> positions;
+};
+
+// One output: a device, and how much of it is currently live.
+struct OutputInfo {
+    std::string id;
+    std::string deviceName;
+    std::string displayName;
+    // True while a live stream to the target device exists. False means the
+    // output is configured but waiting for its device to show up - it can
+    // still be edited, and the edits are kept and applied on connect.
+    bool connected = false;
+    bool autoConnect = true;
+    // Total configured channels, which may exceed liveChannelCount: the extra
+    // entries are retired configs kept across a profile switch.
+    std::size_t channelCount = 0;
+    std::size_t liveChannelCount = 0;
+    // The rate actually negotiated, or 0 when not connected. The GUI needs
+    // this to draw an EQ curve that matches what is really being applied.
+    uint32_t sampleRateHz = 0;
+};
+
+// One mono hardware output channel: the mixer strip.
+struct ChannelInfo {
+    std::size_t index = 0;
+    std::string position;
+    std::string displayName;
+    double gainDb = 0.0;
+    bool muted = false;
+    std::string eqInstanceId;
+    std::string groupId; // empty when ungrouped
+    // False for a configured channel the device doesn't currently offer (a
+    // retired channel after a profile switch). Still fully editable.
+    bool driven = false;
+};
+
+struct EqInstanceInfo {
+    std::string id;
+    std::string displayName;
+    std::size_t bandCount = 0;
+    bool bypassed = false;
+    // How many channels of this output reference it, which the UI shows as
+    // "shared by N".
+    std::size_t channelCount = 0;
+};
+
+struct LinkGroupInfo {
+    std::string id;
+    std::string displayName;
+    std::vector<uint32_t> channelIndices;
+};
+
+struct SendInfo {
+    std::size_t channelIndex = 0;
+    std::string inputId;
+    double gainDb = 0.0;
 };
 
 struct RouteInfo {
@@ -46,7 +110,7 @@ struct RouteInfo {
     bool connected = false;
     bool autoConnect = true;
     // Which stereo pair of the device this output drives; empty for
-    // "device default". See RouteConfig.
+    // "device default".
     std::string leftChannel;
     std::string rightChannel;
 };
@@ -113,56 +177,143 @@ public:
     // reported a change; call it periodically from the main thread.
     void reconcile();
 
+    // True once since the last call: the set of devices (or a device's layout)
+    // changed, so a client's device list is stale. Separate from the flag
+    // reconcile() consumes for its own work, because that one is cleared by
+    // reconciliation whether or not anyone has been told.
+    bool consumeDevicesChanged() {
+        return devicesChangedForClients_.exchange(false, std::memory_order_acq_rel);
+    }
+
     std::vector<DeviceInfo> listDevices() const;
 
-    // Inputs (capture sources apps/other clients play into).
-    std::string addInput(const std::string& displayName);
+    // ------------------------------------------------------------- inputs --
+
+    // Creates a virtual sink with the given channel layout (SPA short names).
+    // An empty layout means stereo. The layout is fixed for the sink's life:
+    // changing it would mean recreating the stream and its ring buffer, which
+    // every live output holds a reference to.
+    //
+    // A new input starts SILENT on every existing output - no sends at all -
+    // so adding one can never disturb an output that was already tuned.
+    std::string addInput(const std::string& displayName,
+                          const std::vector<std::string>& positions = {});
     void removeInput(const std::string& inputId);
+    bool setInputDisplayName(const std::string& inputId, const std::string& displayName);
     std::vector<InputInfo> listInputs() const;
 
-    // Adds a route driving one stereo pair of the given PipeWire node.name,
-    // connecting it immediately if that device is present and leaving it
-    // pending otherwise (so hardware can be configured before it's plugged
-    // in). leftChannel/rightChannel are SPA channel short names, empty for
-    // the device default. Returns the new route id. Seeds every
-    // currently-known input at 0dB, so a new output hears everything by
-    // default.
-    std::string addRoute(const std::string& deviceName, const std::string& displayName,
-                          const std::string& leftChannel = {}, const std::string& rightChannel = {},
-                          double gainDb = 0.0);
-    void removeRoute(const std::string& routeId);
+    // ------------------------------------------------------------ outputs --
 
-    std::vector<RouteInfo> listRoutes() const;
+    // Adds an output for the given PipeWire node.name, connecting it
+    // immediately if that device is present and leaving it pending otherwise
+    // (so hardware can be configured before it's plugged in).
+    //
+    // The channel list is adopted from the device on connect. Every channel
+    // seeds a 0 dB send from every currently-known input, so a newly added
+    // output hears everything by default - the same behaviour outputs have
+    // always had.
+    std::string addOutput(const std::string& deviceName, const std::string& displayName);
+    void removeOutput(const std::string& outputId);
+    std::vector<OutputInfo> listOutputs() const;
+    bool setOutputDisplayName(const std::string& outputId, const std::string& displayName);
 
-    // Each returns false if routeId doesn't name a known route. All of
-    // these work on a route that isn't currently connected: the change is
-    // recorded and applied when it connects.
-    bool setRouteGain(const std::string& routeId, double gainDb);
-    bool setRouteMuted(const std::string& routeId, bool muted);
-    bool setRouteBandCount(const std::string& routeId, std::size_t count);
-    bool setRouteBand(const std::string& routeId, std::size_t index, const eqcore::EqBand& band);
-    std::vector<eqcore::EqBand> getRouteBands(const std::string& routeId) const;
+    // Turning auto-connect on connects the output right away if its device is
+    // already available; turning it off leaves an existing connection alone and
+    // only stops it being reconnected in the future.
+    bool setOutputAutoConnect(const std::string& outputId, bool autoConnect);
 
-    // Turning auto-connect on connects the route right away if its device
-    // is already available; turning it off leaves an existing connection
-    // alone and only stops it being reconnected in the future.
-    bool setRouteAutoConnect(const std::string& routeId, bool autoConnect);
+    // ----------------------------------------------------------- channels --
 
-    // Re-points an output at a different stereo pair of its device (e.g. from
-    // a Scarlett's outputs 1/2 to 3/4), keeping its gain/mute/EQ/mix. The
-    // stream carries the pair in its negotiated format, so a live route is
-    // reconnected to apply this.
-    bool setRouteChannels(const std::string& routeId, const std::string& leftChannel,
-                           const std::string& rightChannel);
+    std::vector<ChannelInfo> getOutputChannels(const std::string& outputId) const;
 
-    // Activates/updates or clears one input's mix level into one route.
-    // False if either id is unknown, or if the route's input-slot pool is
-    // full (OutputRoute::kMaxInputs).
-    bool setRouteInputGain(const std::string& routeId, const std::string& inputId, double gainDb);
-    bool removeRouteInput(const std::string& routeId, const std::string& inputId);
-    std::vector<std::pair<std::string, double>> getRouteInputGains(const std::string& routeId) const;
+    // Gain and mute are LINKED: setting either on a channel that belongs to a
+    // link group writes every member of that group. The per-channel fields stay
+    // the single source of truth, so there is never a group value that can
+    // disagree with its members.
+    bool setChannelGain(const std::string& outputId, std::size_t channelIndex, double gainDb);
+    bool setChannelMuted(const std::string& outputId, std::size_t channelIndex, bool muted);
 
-    static constexpr int kNumChannels = 2;
+    // Changing a channel's logical position is control-plane only: the stream
+    // always carries the device's own layout, so this is a snapshot rebuild
+    // rather than a reconnect. It changes which input channels are matched into
+    // this channel and nothing else.
+    bool setChannelPosition(const std::string& outputId, std::size_t channelIndex,
+                             const std::string& position);
+    bool setChannelDisplayName(const std::string& outputId, std::size_t channelIndex,
+                                const std::string& displayName);
+
+    // Points a channel at one of its output's EQ instances, or at none when
+    // eqInstanceId is empty. Unlike gain and mute this is NOT linked: giving
+    // FL and FR different EQs is the whole point of per-channel EQ.
+    bool setChannelEqInstance(const std::string& outputId, std::size_t channelIndex,
+                               const std::string& eqInstanceId);
+
+    // --------------------------------------------------------------- EQ --
+
+    std::vector<EqInstanceInfo> listEqInstances(const std::string& outputId) const;
+    // Returns the new instance id, or empty if outputId is unknown.
+    std::string addEqInstance(const std::string& outputId, const std::string& displayName);
+    bool removeEqInstance(const std::string& outputId, const std::string& eqInstanceId);
+    bool setEqInstanceName(const std::string& outputId, const std::string& eqInstanceId,
+                            const std::string& displayName);
+    bool setEqBypassed(const std::string& outputId, const std::string& eqInstanceId, bool bypassed);
+    bool setEqBandCount(const std::string& outputId, const std::string& eqInstanceId,
+                         std::size_t count);
+    bool setEqBand(const std::string& outputId, const std::string& eqInstanceId, std::size_t index,
+                    const eqcore::EqBand& band);
+    std::vector<eqcore::EqBand> getEqBands(const std::string& outputId,
+                                            const std::string& eqInstanceId) const;
+
+    // Copies an instance (and its bands) onto another output. This is how one
+    // curve gets shared across devices - instances are owned per output, so
+    // cross-device sharing is a copy rather than a shared reference.
+    std::string copyEqInstance(const std::string& sourceOutputId, const std::string& eqInstanceId,
+                                const std::string& targetOutputId);
+
+    // Convenience: resolve a channel to its EQ instance. The band-setting forms
+    // CREATE an instance on demand and assign it to the channel, which lets a
+    // caller edit a channel's EQ without knowing instances exist at all.
+    std::vector<eqcore::EqBand> getChannelEqBands(const std::string& outputId,
+                                                   std::size_t channelIndex) const;
+    bool setChannelEqBandCount(const std::string& outputId, std::size_t channelIndex,
+                                std::size_t count);
+    bool setChannelEqBand(const std::string& outputId, std::size_t channelIndex, std::size_t index,
+                           const eqcore::EqBand& band);
+
+    // ------------------------------------------------------- link groups --
+
+    std::vector<LinkGroupInfo> listLinkGroups(const std::string& outputId) const;
+    // Joins channels so they share fader, mute and send levels. The group
+    // adopts its LOWEST-INDEX member's values, so linking is never ambiguous
+    // about which side wins. Returns the new group id, or empty on failure
+    // (fewer than two channels, an out-of-range index, or a channel that is
+    // already in another group).
+    std::string createLinkGroup(const std::string& outputId,
+                                 const std::vector<uint32_t>& channelIndices,
+                                 const std::string& displayName);
+    bool removeLinkGroup(const std::string& outputId, const std::string& groupId);
+    bool setLinkGroupChannels(const std::string& outputId, const std::string& groupId,
+                               const std::vector<uint32_t>& channelIndices);
+
+    // ------------------------------------------------------------- sends --
+
+    // Every routed (channel, input) pair of this output. A pair that is absent
+    // is not routed at all, which is deliberately distinct from a 0 dB send.
+    std::vector<SendInfo> getSends(const std::string& outputId) const;
+    // Sets one input's level into one channel, linked across the channel's
+    // group. False if either id is unknown, or if the output's send pool
+    // (kMaxInputs) is full and this input has no slot yet.
+    bool setSend(const std::string& outputId, std::size_t channelIndex, const std::string& inputId,
+                  double gainDb);
+    bool removeSend(const std::string& outputId, std::size_t channelIndex, const std::string& inputId);
+
+    // ----------------------------------------------------------- metering --
+
+    // Peak magnitude per channel since the previous call, then resets. Empty
+    // for an output that isn't connected.
+    std::vector<float> takeOutputPeaks(const std::string& outputId);
+
+    static constexpr int kDefaultInputChannels = 2;
     static constexpr uint32_t kSampleRateHz = 48000;
 
     // Public because they're referenced from file-scope pw_*_events structs
@@ -177,18 +328,46 @@ private:
     // A route's desired configuration, plus the live stream when its device
     // is present. `desired` is the single source of truth for everything the
     // control plane reports or persists; `live` is derived from it.
+    //
+    // `desired` is the v2 per-channel OutputConfig. While this engine's public
+    // API is still stereo-pair shaped, the pair is channels[0]/channels[1]
+    // kept in one link group - see the pair-view helpers at the top of
+    // audio_engine.cpp, which are the only place that mapping lives.
     struct RouteEntry {
-        eqcore::RouteConfig desired;
-        std::unique_ptr<OutputRoute> live;
+        eqcore::OutputConfig desired;
+        std::unique_ptr<OutputStream> live;
         uint32_t targetNodeId = SPA_ID_INVALID; // node id `live` was connected to
+
+        // The layout `live`'s stream was CREATED with, so reconcile() can tell
+        // a profile switch (which needs renegotiation) from a mere property
+        // refresh (which must not tear the stream down).
+        std::vector<std::string> livePositions;
+        // How many of desired.channels the device actually drives. Entries
+        // beyond this are retired configs; see OutputConfig::channels.
+        std::size_t liveChannelCount = 0;
     };
 
     // All of these assume controlMutex_ is held.
     RouteEntry* findEntryLocked(const std::string& routeId);
     const RouteEntry* findEntryLocked(const std::string& routeId) const;
     InputSource* findInputLocked(const std::string& inputId) const;
-    std::string addInputLocked(std::string inputId, const std::string& displayName);
-    void connectLocked(RouteEntry& entry, uint32_t targetNodeId);
+    std::string addInputLocked(std::string inputId, const std::string& displayName,
+                                const std::vector<std::string>& positions);
+    // Every channel index a set on `channelIndex` must write: its whole link
+    // group, or just itself when ungrouped. Empty for an out-of-range index.
+    std::vector<std::size_t> linkedChannelsLocked(RouteEntry& entry, std::size_t channelIndex) const;
+    // The channel's EQ instance, created and assigned on demand.
+    eqcore::EqInstanceConfig& channelEqInstanceLocked(RouteEntry& entry, std::size_t channelIndex);
+    // Copies the lowest-index member's gain/mute/sends onto the rest.
+    void adoptGroupLeaderLocked(RouteEntry& entry, const std::vector<uint32_t>& channelIndices);
+    // The distinct inputs any channel of this output sends from, which is what
+    // the per-output send pool (kMaxInputs) actually bounds.
+    std::set<std::string> routedInputsLocked(const RouteEntry& entry) const;
+    void connectLocked(RouteEntry& entry, const DeviceInfo& device);
+    // Rebuilds and publishes the RT snapshot for a live output from its desired
+    // configuration. The single funnel every mutation goes through, so there is
+    // exactly one place that knows how config maps onto realtime state.
+    void republishLocked(RouteEntry& entry);
     void disconnectLocked(RouteEntry& entry);
     // Connects entry if it should be and isn't, or disconnects it if its
     // device went away or moved to a new node id.
@@ -234,6 +413,7 @@ private:
     mutable std::mutex devicesMutex_; // leaf: never taken while holding another
     std::vector<DeviceInfo> devices_;
     std::atomic<bool> devicesDirty_{false};
+    std::atomic<bool> devicesChangedForClients_{false};
 
     std::vector<std::unique_ptr<BoundNode>> boundNodes_; // loop thread only
 

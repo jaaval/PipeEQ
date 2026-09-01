@@ -20,6 +20,10 @@ class QTabWidget;
 
 namespace pipeeq {
 
+// Transitional window: the same layout as before, but a row in the left-hand
+// list is now one hardware output CHANNEL rather than one stereo-pair output.
+// This exists so the daemon rework could land with a working GUI on top of it;
+// the TotalMix-style rack replaces it wholesale.
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -27,62 +31,61 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
 
 private slots:
-    void onAddRouteClicked();
-    void onRemoveRouteClicked();
-    void onRouteSelectionChanged();
+    void onAddOutputClicked();
+    void onRemoveOutputClicked();
+    void onStripSelectionChanged();
     void onGainSliderChanged(int value);
     void onMuteToggled(bool checked);
     void onAutoConnectToggled(bool checked);
-    void onChannelPairChanged(int index);
+    void onChannelPositionChanged(int index);
     void onBandCountChanged(int count);
     void onCurveBandEdited(int index, eqcore::EqBand band);
     void onCopyEqClicked();
     void onAddInputClicked();
     void onRemoveInputClicked();
-    void onDaemonRouteChanged(const QString& routeId);
+    void onDaemonOutputChanged(const QString& outputId);
     void onDaemonInputsChanged();
-    void refreshRoutes();
+    void refreshStrips();
     void refreshDevices();
     void refreshInputs();
 
 private:
-    void selectRoute(const QString& routeId);
-    void loadRouteDetail(const RouteRow& route);
-    // Refreshes only what can change without the route set changing (labels,
+    void selectStrip(const QString& stripId);
+    void loadStripDetail(const StripRow& strip);
+    // Refreshes only what can change without the strip set changing (labels,
     // connected state, gain/mute/auto-connect), leaving the band and mixer
-    // tables alone - rebuilding those on a periodic poll would yank widgets
-    // out from under a slider the user is dragging.
-    void updateRouteStatus();
-    // Sets one output list row's text/tooltip/color from its connected and
+    // tables alone - rebuilding those on a refresh would yank widgets out from
+    // under a slider the user is dragging.
+    void updateStripStatus();
+    // Sets one list row's text/tooltip/color from its connected and
     // auto-connect state. The label is kept short because the list is narrow;
     // the tooltip carries the detail.
-    void applyRouteItem(QListWidgetItem* item, const RouteRow& route) const;
-    // Fills the channel-pair dropdown with the pairs the selected output's
-    // device offers, and selects the one it currently drives.
-    void rebuildChannelCombo(const RouteRow& route);
-    // How many entries the device list has for this node.name - used to decide
-    // whether a device needs its pair spelled out in the label at all.
-    int pairCountForDevice(const QString& nodeName) const;
-    // True if the route's device is present but no longer offers its pair,
-    // which is why it can be disconnected while the device is plugged in.
-    bool channelsUnavailable(const RouteRow& route) const;
+    void applyStripItem(QListWidgetItem* item, const StripRow& strip) const;
+    // Fills the position dropdown with the channel positions the selected
+    // strip's device advertises, and selects the one it currently claims.
+    void rebuildPositionCombo(const StripRow& strip);
+    // True when the strip's output is connected but this particular channel
+    // isn't driven - a channel the device's current profile doesn't offer.
+    bool channelUnavailable(const StripRow& strip) const;
     void rebuildBandTable(const std::vector<eqcore::EqBand>& bands);
     void rebuildMixerTable();
     void pushBandRow(int row);
     void pushMixerRow(int row);
-    const RouteRow* findRoute(const QString& routeId) const;
+    const StripRow* findStrip(const QString& stripId) const;
+    // The device row for a strip's target, or null when it isn't present.
+    const DeviceRow* findDevice(const QString& nodeName) const;
 
     DbusClient* dbus_;
 
-    QListWidget* routeList_ = nullptr;
+    QListWidget* stripList_ = nullptr;
     QComboBox* deviceCombo_ = nullptr;
     QPushButton* addButton_ = nullptr;
     QPushButton* removeButton_ = nullptr;
 
     QCheckBox* muteCheck_ = nullptr;
     QCheckBox* autoConnectCheck_ = nullptr;
-    QComboBox* channelCombo_ = nullptr;
-    QLabel* channelLabel_ = nullptr;
+    QComboBox* positionCombo_ = nullptr;
+    QLabel* positionLabel_ = nullptr;
     QSlider* gainSlider_ = nullptr;
     QLabel* gainLabel_ = nullptr;
     QTabWidget* detailTabs_ = nullptr;
@@ -93,18 +96,18 @@ private:
     QTableWidget* bandTable_ = nullptr;
     EqCurveWidget* curveWidget_ = nullptr;
 
-    // Mixer tab: one row per known input, each with an on/off checkbox and
-    // a level slider scoped to whichever route is currently selected.
+    // Mixer tab: one row per known input, each with an on/off checkbox and a
+    // level slider scoped to whichever channel is currently selected.
     QPushButton* addInputButton_ = nullptr;
     QPushButton* removeInputButton_ = nullptr;
     QTableWidget* mixerTable_ = nullptr;
 
     QLabel* statusLabel_ = nullptr;
 
-    std::vector<RouteRow> routes_;
+    std::vector<StripRow> strips_;
     std::vector<DeviceRow> devices_;
     std::vector<InputRow> inputs_;
-    QString currentRouteId_;
+    QString currentStripId_;
     bool suppressSignals_ = false;
 };
 
