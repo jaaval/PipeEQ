@@ -91,6 +91,23 @@ inline void checkNear(double a, double b, double tolerance, const char* exprA, c
     }
 }
 
+// How long a concurrency smoke test should spin.
+//
+// Tests that busy-loop for a fixed wall-clock duration are hostile to
+// instrumented runs: under Helgrind or DRD the same window does a fraction of
+// the work while costing a hundred times the CPU, so a 200 ms loop can take
+// many minutes. PIPEEQ_TEST_CONCURRENCY_MS lets those runs ask for a shorter
+// window without weakening the default.
+inline int concurrencyMs(int defaultMs) {
+    if (const char* override = std::getenv("PIPEEQ_TEST_CONCURRENCY_MS")) {
+        const int value = std::atoi(override);
+        if (value > 0) {
+            return value;
+        }
+    }
+    return defaultMs;
+}
+
 inline int summary(const char* suite) {
     if (registry().failures > 0) {
         std::fprintf(stderr, "\n%s: %d of %d checks FAILED\n", suite, registry().failures,

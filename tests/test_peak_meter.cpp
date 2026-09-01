@@ -111,7 +111,7 @@ void testConcurrentWriterAndReader() {
         }
     });
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    std::this_thread::sleep_for(std::chrono::milliseconds(pipeeq::test::concurrencyMs(150)));
     stop.store(true, std::memory_order_relaxed);
     writer.join();
     reader.join();
