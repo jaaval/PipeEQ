@@ -190,12 +190,15 @@ std::vector<eqcore::EqBand> FakeBackend::getChannelEqBands(const QString& output
     return channel ? channel->bands : std::vector<eqcore::EqBand>{};
 }
 
-std::vector<std::pair<QString, double>> FakeBackend::getChannelSends(const QString& outputId,
-                                                                      uint32_t channelIndex) {
-    std::vector<std::pair<QString, double>> result;
-    if (const Channel* channel = findChannel(outputId, channelIndex)) {
-        for (const auto& [inputId, gainDb] : channel->sendsDb) {
-            result.emplace_back(inputId, gainDb);
+QVector<SendEntry> FakeBackend::getOutputSends(const QString& outputId) {
+    QVector<SendEntry> result;
+    const Output* output = findOutput(outputId);
+    if (!output) {
+        return result;
+    }
+    for (std::size_t i = 0; i < output->channels.size(); ++i) {
+        for (const auto& [inputId, gainDb] : output->channels[i].sendsDb) {
+            result.push_back(SendEntry{static_cast<uint32_t>(i), inputId, gainDb});
         }
     }
     return result;

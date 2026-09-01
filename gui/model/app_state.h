@@ -45,9 +45,19 @@ public:
     // Cached per-channel detail. Empty until the first detail fetch for that
     // channel completes; requestChannelDetail() asks for it.
     QVector<eqcore::EqBand> channelBands(const QString& outputId, uint32_t channelIndex) const;
+    // The sends routed to one channel of an output.
     QVector<QPair<QString, double>> channelSends(const QString& outputId,
                                                   uint32_t channelIndex) const;
+    // How many DISTINCT inputs this output sends from, against the limit. The
+    // bound is per output, not per channel, so it can't be derived from one
+    // channel's sends.
+    int routedInputCount(const QString& outputId) const;
+    // True if this input already has a send on ANY channel of the output, and
+    // therefore already occupies one of its send slots.
+    bool inputOccupiesSlot(const QString& outputId, const QString& inputId) const;
+    int maxSendsPerOutput() const { return snapshot_.maxSendsPerOutput; }
     void requestChannelDetail(const QString& outputId, uint32_t channelIndex);
+    void requestOutputSends(const QString& outputId);
 
     LevelMeters& meters() { return meters_; }
 
@@ -91,6 +101,7 @@ signals:
     // topologyChanged so a refresh doesn't destroy widgets under the cursor.
     void stripsUpdated();
     void channelDetailUpdated(const QString& outputId, uint32_t channelIndex);
+    void sendsUpdated(const QString& outputId);
     void availabilityChanged(bool available);
     void errorReported(const QString& message);
 
@@ -108,7 +119,6 @@ private:
 
     struct ChannelDetail {
         QVector<eqcore::EqBand> bands;
-        QVector<QPair<QString, double>> sends;
     };
 
     QThread workerThread_;
@@ -116,6 +126,8 @@ private:
 
     DaemonSnapshot snapshot_;
     QHash<QString, ChannelDetail> details_;
+    // Whole send matrix per output id.
+    QHash<QString, QVector<SendEntry>> sends_;
 
     EditGuard guard_;
     WriteCoalescer coalescer_;

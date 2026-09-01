@@ -1,7 +1,5 @@
 #include "main_window.h"
 
-#include "widgets/strip_rack.h"
-
 #include <algorithm>
 #include <cmath>
 
@@ -14,16 +12,16 @@
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QLabel>
-#include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
-#include <QSlider>
 #include <QSpinBox>
+#include <QStackedWidget>
 #include <QStatusBar>
-#include <QTabWidget>
 #include <QTableWidget>
-#include <QTimer>
 #include <QVBoxLayout>
+
+#include "widgets/detail_panel.h"
+#include "widgets/strip_rack.h"
 
 namespace pipeeq {
 
@@ -34,36 +32,20 @@ namespace {
 const struct {
     eqcore::FilterType type;
     const char* label;
-    const char* wireName;
 } kFilterTypeOptions[] = {
-    {eqcore::FilterType::Peaking, "Peaking", "peaking"},
-    {eqcore::FilterType::LowShelf, "Low shelf", "low_shelf"},
-    {eqcore::FilterType::HighShelf, "High shelf", "high_shelf"},
-    {eqcore::FilterType::LowPass, "Low pass", "low_pass"},
-    {eqcore::FilterType::HighPass, "High pass", "high_pass"},
+    {eqcore::FilterType::Peaking, "Peaking"},
+    {eqcore::FilterType::LowShelf, "Low shelf"},
+    {eqcore::FilterType::HighShelf, "High shelf"},
+    {eqcore::FilterType::LowPass, "Low pass"},
+    {eqcore::FilterType::HighPass, "High pass"},
 };
-
-constexpr int kMinGainDb = -60;
-constexpr int kMaxGainDb = 12;
-// The level a mixer row shows for an input the channel isn't routed to at all.
-// "Absent" and "-60 dB" are different things to the daemon; this is only how
-// the off state is displayed.
-constexpr double kOffLevelDb = -60.0;
-
-QString wireNameFor(eqcore::FilterType type) {
-    for (const auto& option : kFilterTypeOptions) {
-        if (option.type == type) {
-            return QString::fromLatin1(option.wireName);
-        }
-    }
-    return QStringLiteral("peaking");
-}
 
 } // namespace
 
-MainWindow::MainWindow(AppState* state, QWidget* parent) : QMainWindow(parent), state_(state) {
+MainWindow::MainWindow(AppState* state, QWidget* parent)
+    : QMainWindow(parent), state_(state) {
     setWindowTitle("PipeEQ");
-    resize(1000, 640);
+    resize(1280, 740);
 
     auto* central = new QWidget(this);
     auto* rootLayout = new QVBoxLayout(central);
@@ -72,7 +54,7 @@ MainWindow::MainWindow(AppState* state, QWidget* parent) : QMainWindow(parent), 
     // ---- top bar: output management ----
     auto* topBar = new QHBoxLayout;
     deviceCombo_ = new QComboBox(central);
-    deviceCombo_->setMinimumWidth(260);
+    deviceCombo_->setMinimumWidth(280);
     addButton_ = new QPushButton("Add output", central);
     connect(addButton_, &QPushButton::clicked, this, &MainWindow::onAddOutputClicked);
     removeButton_ = new QPushButton("Remove output", central);
@@ -83,112 +65,74 @@ MainWindow::MainWindow(AppState* state, QWidget* parent) : QMainWindow(parent), 
     topBar->addStretch(1);
     rootLayout->addLayout(topBar);
 
-    // ---- detail area: the selected channel or group ----
-    auto* rightLayout = new QVBoxLayout;
+    // ---- detail area ----
+    //
+    // Page 0 is the selection's sends and EQ preview; page 1 is the EQ editor.
+    // A stacked page rather than a separate window, so there is one window title
+    // to capture in a screenshot and no modal dialog stalling the meter timer.
+    detailStack_ = new QStackedWidget(central);
 
-    auto* controlsRow = new QHBoxLayout;
-    muteCheck_ = new QCheckBox("Mute", central);
-    connect(muteCheck_, &QCheckBox::toggled, this, &MainWindow::onMuteToggled);
-    controlsRow->addWidget(muteCheck_);
+    detailPanel_ = new DetailPanel(state_, detailStack_);
+    connect(detailPanel_, &DetailPanel::eqEditRequested, this,
+            [this](const QString&) { detailStack_->setCurrentIndex(1); });
+    connect(detailPanel_, &DetailPanel::addInputRequested, this, &MainWindow::onAddInputClicked);
+    detailStack_->addWidget(detailPanel_);
 
-    autoConnectCheck_ = new QCheckBox("Auto-connect", central);
-    connect(autoConnectCheck_, &QCheckBox::toggled, this, &MainWindow::onAutoConnectToggled);
-    controlsRow->addWidget(autoConnectCheck_);
-
-    positionLabel_ = new QLabel("Position:", central);
-    positionCombo_ = new QComboBox(central);
-    connect(positionCombo_, &QComboBox::currentIndexChanged, this,
-            &MainWindow::onChannelPositionChanged);
-    controlsRow->addWidget(positionLabel_);
-    controlsRow->addWidget(positionCombo_);
-
-    controlsRow->addWidget(new QLabel("Gain:", central));
-    gainSlider_ = new QSlider(Qt::Horizontal, central);
-    gainSlider_->setRange(kMinGainDb, kMaxGainDb);
-    connect(gainSlider_, &QSlider::valueChanged, this, &MainWindow::onGainSliderChanged);
-    connect(gainSlider_, &QSlider::sliderPressed, this, &MainWindow::onGainSliderPressed);
-    connect(gainSlider_, &QSlider::sliderReleased, this, &MainWindow::onGainSliderReleased);
-    controlsRow->addWidget(gainSlider_, 1);
-
-    gainLabel_ = new QLabel("0 dB", central);
-    gainLabel_->setMinimumWidth(60);
-    controlsRow->addWidget(gainLabel_);
-    rightLayout->addLayout(controlsRow);
-
-    detailTabs_ = new QTabWidget(central);
-
-    // ---- EQ tab ----
-    auto* eqTab = new QWidget(detailTabs_);
-    auto* eqLayout = new QVBoxLayout(eqTab);
+    auto* eqPage = new QWidget(detailStack_);
+    auto* eqLayout = new QVBoxLayout(eqPage);
 
     auto* eqControlsRow = new QHBoxLayout;
-    eqControlsRow->addWidget(new QLabel("Bands:", eqTab));
-    bandCountSpin_ = new QSpinBox(eqTab);
+    auto* backButton = new QPushButton("< Back to mixer", eqPage);
+    connect(backButton, &QPushButton::clicked, this, [this] { detailStack_->setCurrentIndex(0); });
+    eqControlsRow->addWidget(backButton);
+    eqControlsRow->addWidget(new QLabel("Bands:", eqPage));
+    bandCountSpin_ = new QSpinBox(eqPage);
     bandCountSpin_->setRange(0, 16);
     connect(bandCountSpin_, &QSpinBox::valueChanged, this, &MainWindow::onBandCountChanged);
     eqControlsRow->addWidget(bandCountSpin_);
     eqControlsRow->addStretch(1);
-    copyEqButton_ = new QPushButton("Copy EQ to...", eqTab);
+    copyEqButton_ = new QPushButton("Copy EQ to...", eqPage);
     connect(copyEqButton_, &QPushButton::clicked, this, &MainWindow::onCopyEqClicked);
     eqControlsRow->addWidget(copyEqButton_);
     eqLayout->addLayout(eqControlsRow);
 
-    bandTable_ = new QTableWidget(0, 4, eqTab);
+    bandTable_ = new QTableWidget(0, 4, eqPage);
     bandTable_->setHorizontalHeaderLabels({"Type", "Freq (Hz)", "Gain (dB)", "Q"});
     bandTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    bandTable_->setMaximumHeight(200);
+    bandTable_->setMaximumHeight(180);
     eqLayout->addWidget(bandTable_);
 
-    curveWidget_ = new EqCurveWidget(eqTab);
+    curveWidget_ = new EqCurveWidget(eqPage);
     connect(curveWidget_, &EqCurveWidget::bandEdited, this, &MainWindow::onCurveBandEdited);
+    connect(curveWidget_, &EqCurveWidget::bandEditBegan, this, &MainWindow::onCurveBandEditBegan);
+    connect(curveWidget_, &EqCurveWidget::bandEditFinished, this,
+            &MainWindow::onCurveBandEditFinished);
     eqLayout->addWidget(curveWidget_, 1);
 
-    detailTabs_->addTab(eqTab, "EQ");
+    detailStack_->addWidget(eqPage);
+    rootLayout->addWidget(detailStack_, 1);
 
-    // ---- Mixer tab ----
-    auto* mixerTab = new QWidget(detailTabs_);
-    auto* mixerLayout = new QVBoxLayout(mixerTab);
-
-    auto* mixerControlsRow = new QHBoxLayout;
-    addInputButton_ = new QPushButton("Add Input...", mixerTab);
-    connect(addInputButton_, &QPushButton::clicked, this, &MainWindow::onAddInputClicked);
-    removeInputButton_ = new QPushButton("Remove Selected Input", mixerTab);
-    connect(removeInputButton_, &QPushButton::clicked, this, &MainWindow::onRemoveInputClicked);
-    mixerControlsRow->addWidget(addInputButton_);
-    mixerControlsRow->addWidget(removeInputButton_);
-    mixerControlsRow->addStretch(1);
-    mixerLayout->addLayout(mixerControlsRow);
-
-    mixerTable_ = new QTableWidget(0, 3, mixerTab);
-    mixerTable_->setHorizontalHeaderLabels({"Input", "On", "Level (dB)"});
-    mixerTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    mixerLayout->addWidget(mixerTable_, 1);
-
-    detailTabs_->addTab(mixerTab, "Mixer");
-    rightLayout->addWidget(detailTabs_, 1);
-
-    auto* rightContainer = new QWidget(central);
-    rightContainer->setLayout(rightLayout);
-    rootLayout->addWidget(rightContainer, 1);
+    // The two pages want very different amounts of room: the mixer view should
+    // leave the strip rack as the dominant surface, while editing an EQ curve
+    // wants all the height it can get. So the split changes with the page
+    // rather than being a compromise that suits neither.
+    connect(detailStack_, &QStackedWidget::currentChanged, this,
+            [this](int index) { applyDetailSizing(index); });
 
     // ---- the mixer row, along the bottom ----
     stripRack_ = new StripRack(state_, central);
     connect(stripRack_, &StripRack::selectionChanged, this, &MainWindow::onRackSelectionChanged);
     connect(stripRack_, &StripRack::positionClicked, this, [this](const QString& stripId) {
-        // The position badge is the affordance; the combo above is where the
-        // choice is actually made until the popup grid exists.
         selectStrip(stripId);
-        if (positionCombo_->isVisible()) {
-            positionCombo_->showPopup();
-        }
+        detailStack_->setCurrentIndex(0);
     });
-    connect(stripRack_, &StripRack::linkToggleRequested, this, [this](const QString& stripId) {
-        Q_UNUSED(stripId);
+    connect(stripRack_, &StripRack::linkToggleRequested, this, [this](const QString&) {
         statusLabel_->setText("Linking and unlinking arrive with the grouping work.");
     });
     rootLayout->addWidget(stripRack_);
 
     setCentralWidget(central);
+    applyDetailSizing(0);
 
     statusLabel_ = new QLabel(this);
     statusBar()->addWidget(statusLabel_);
@@ -196,16 +140,31 @@ MainWindow::MainWindow(AppState* state, QWidget* parent) : QMainWindow(parent), 
     connect(state_, &AppState::topologyChanged, this, &MainWindow::onTopologyChanged);
     connect(state_, &AppState::stripsUpdated, this, &MainWindow::onStripsUpdated);
     connect(state_, &AppState::channelDetailUpdated, this, &MainWindow::onChannelDetailUpdated);
+    connect(state_, &AppState::sendsUpdated, this,
+            [this](const QString&) { detailPanel_->refreshValues(); });
     connect(state_, &AppState::errorReported, this, &MainWindow::onErrorReported);
     connect(state_, &AppState::availabilityChanged, this, [this](bool) { updateStripStatus(); });
-    // One timer in the store drives every meter; the rack decides which strips
-    // are actually visible and worth repainting.
-    connect(&state_->meters(), &LevelMeters::levelsUpdated, this,
-            [this] { stripRack_->refreshMeters(); });
+    // One timer in the store drives every meter; each rack decides which of its
+    // widgets are actually visible and worth repainting.
+    connect(&state_->meters(), &LevelMeters::levelsUpdated, this, [this] {
+        stripRack_->refreshMeters();
+        detailPanel_->refreshMeters();
+    });
 
     onTopologyChanged();
-    // The store owns the safety resync now, off the GUI thread, so there is no
-    // poll timer here at all.
+}
+
+void MainWindow::applyDetailSizing(int pageIndex) {
+    // The rack gets a FIXED height and the detail area absorbs the slack, rather
+    // than the other way round. Letting the rack stretch made the faders
+    // absurdly tall on a big window, and a fader's travel should be a usable
+    // size rather than however much room happens to be left over.
+    const bool editingEq = pageIndex == 1;
+    // Collapsing the rack rather than hiding it while editing: the selection
+    // stays visible, so it is obvious which channel's curve is on screen.
+    const int rackHeight = editingEq ? 150 : 300;
+    stripRack_->setMinimumHeight(rackHeight);
+    stripRack_->setMaximumHeight(rackHeight);
 }
 
 // ------------------------------------------------------------------ lookups --
@@ -216,10 +175,6 @@ const StripRow* MainWindow::findStrip(const QString& stripId) const {
 
 const DeviceRow* MainWindow::findDevice(const QString& nodeName) const {
     return state_->findDevice(nodeName);
-}
-
-bool MainWindow::channelUnavailable(const StripRow& strip) const {
-    return strip.connected && !strip.driven;
 }
 
 // ---------------------------------------------------------------- refreshing --
@@ -259,33 +214,31 @@ void MainWindow::refreshStrips() {
                                                             : stripRack_->selectedStripId());
     } else {
         currentStripId_.clear();
+        detailPanel_->setSelection(QString());
         updateStripStatus();
     }
 }
 
 void MainWindow::refreshInputs() {
-    rebuildMixerTable();
+    detailPanel_->rebuildSends();
 }
 
 void MainWindow::updateStripStatus() {
     const StripRow* strip = findStrip(currentStripId_);
 
-    // Push current values into the existing strips rather than rebuilding them.
+    // Push current values into the existing widgets rather than rebuilding them.
     stripRack_->refreshValues();
+    detailPanel_->refreshValues();
 
     const bool haveStrip = strip != nullptr;
-    muteCheck_->setEnabled(haveStrip);
-    autoConnectCheck_->setEnabled(haveStrip);
-    gainSlider_->setEnabled(haveStrip);
     bandCountSpin_->setEnabled(haveStrip);
     copyEqButton_->setEnabled(haveStrip);
     removeButton_->setEnabled(haveStrip);
-    detailTabs_->setEnabled(haveStrip);
 
     if (!haveStrip) {
-        // "No daemon" and "no outputs yet" used to be indistinguishable here,
-        // which made a daemon that wasn't running look like a working one with
-        // nothing configured.
+        // "No daemon" and "no outputs yet" used to be indistinguishable, which
+        // made a daemon that wasn't running look like a working one with nothing
+        // configured.
         if (!state_->isAvailable()) {
             statusLabel_->setText("Not connected to pipeeq-daemon. Is the service running?");
         } else {
@@ -293,21 +246,11 @@ void MainWindow::updateStripStatus() {
                                        ? "No outputs configured. Pick a device and press Add."
                                        : "No channel selected.");
         }
-        gainLabel_->setText("- dB");
         return;
     }
 
-    const bool wasSuppressed = suppressSignals_;
-    suppressSignals_ = true;
-    muteCheck_->setChecked(strip->muted);
-    autoConnectCheck_->setChecked(strip->autoConnect);
-    gainSlider_->setValue(static_cast<int>(std::lround(strip->gainDb)));
-    suppressSignals_ = wasSuppressed;
-
-    gainLabel_->setText(QString("%1 dB").arg(strip->gainDb, 0, 'f', 1));
-
     QString status = QString("%1  -  %2").arg(strip->label(), strip->deviceName);
-    if (channelUnavailable(*strip)) {
+    if (strip->connected && !strip->driven) {
         status += "  -  channel not offered by the device's current profile";
     } else if (!strip->connected) {
         status += strip->autoConnect ? "  -  waiting for the device" : "  -  auto-connect off";
@@ -323,9 +266,11 @@ void MainWindow::updateStripStatus() {
 void MainWindow::selectStrip(const QString& stripId) {
     stripRack_->setSelectedStripId(stripId);
     currentStripId_ = stripId;
+    detailPanel_->setSelection(stripId);
     if (const StripRow* strip = findStrip(stripId)) {
         loadStripDetail(*strip);
     }
+    updateStripStatus();
 }
 
 void MainWindow::onRackSelectionChanged(const QString& stripId) {
@@ -333,10 +278,8 @@ void MainWindow::onRackSelectionChanged(const QString& stripId) {
 }
 
 void MainWindow::loadStripDetail(const StripRow& strip) {
-    rebuildPositionCombo(strip);
-
-    // Draw whatever the store already has, and ask for a refresh. The request
-    // is async, so selecting a channel is instant even if the daemon is slow;
+    // Draw whatever the store already has and ask for a refresh. The request is
+    // async, so selecting a channel is instant even if the daemon is slow;
     // onChannelDetailUpdated redraws when the answer arrives.
     const QVector<eqcore::EqBand> cached = state_->channelBands(strip.outputId, strip.channelIndex);
     const std::vector<eqcore::EqBand> bands(cached.begin(), cached.end());
@@ -348,39 +291,7 @@ void MainWindow::loadStripDetail(const StripRow& strip) {
 
     rebuildBandTable(bands);
     curveWidget_->setBands(bands);
-    rebuildMixerTable();
-    updateStripStatus();
-
     state_->requestChannelDetail(strip.outputId, strip.channelIndex);
-}
-
-void MainWindow::rebuildPositionCombo(const StripRow& strip) {
-    const DeviceRow* device = findDevice(strip.deviceName);
-
-    const bool wasSuppressed = suppressSignals_;
-    suppressSignals_ = true;
-    positionCombo_->clear();
-
-    QVector<QString> options = device ? device->positions : QVector<QString>{};
-    // Always offer the strip's CURRENT position even when the device no longer
-    // advertises it, so a profile change doesn't silently snap the channel
-    // somewhere else the moment the combo is rebuilt.
-    if (!strip.position.isEmpty() && !options.contains(strip.position)) {
-        options.push_back(strip.position);
-    }
-    for (const QString& position : options) {
-        positionCombo_->addItem(position, position);
-    }
-    const int current = positionCombo_->findData(strip.position);
-    if (current >= 0) {
-        positionCombo_->setCurrentIndex(current);
-    }
-    suppressSignals_ = wasSuppressed;
-
-    // Nothing to choose between is just noise on screen.
-    const bool useful = positionCombo_->count() > 1;
-    positionCombo_->setVisible(useful);
-    positionLabel_->setVisible(useful);
 }
 
 // ----------------------------------------------------------------- mutations --
@@ -391,9 +302,9 @@ void MainWindow::onAddOutputClicked() {
         QMessageBox::information(this, "PipeEQ", "No output device is available to add.");
         return;
     }
-    // Fire and forget: the new output's id comes back as part of the next
-    // snapshot rather than as a return value, and the store's topologyChanged
-    // rebuilds the list. Selection falls back to whatever survives.
+    // Fire and forget: the new output's id arrives as part of the next snapshot
+    // rather than as a return value, and the store's topologyChanged rebuilds
+    // the rack.
     state_->addOutput(deviceName, deviceCombo_->currentText());
 }
 
@@ -402,8 +313,8 @@ void MainWindow::onRemoveOutputClicked() {
     if (!strip) {
         return;
     }
-    // A strip is one channel, but removal is per output - be explicit about it
-    // rather than quietly deleting the sibling channels too.
+    // A strip is one channel, but removal is per output - be explicit rather
+    // than quietly deleting the sibling channels too.
     const auto answer = QMessageBox::question(
         this, "Remove output",
         QString("Remove the whole output \"%1\" and all of its channels?").arg(strip->outputName));
@@ -413,64 +324,18 @@ void MainWindow::onRemoveOutputClicked() {
     state_->removeOutput(strip->outputId);
 }
 
-void MainWindow::onGainSliderChanged(int value) {
-    if (suppressSignals_) {
+void MainWindow::onAddInputClicked() {
+    bool accepted = false;
+    const QString name =
+        QInputDialog::getText(this, "Add input", "Name for the new virtual sink:", QLineEdit::Normal,
+                               QString(), &accepted);
+    if (!accepted || name.trimmed().isEmpty()) {
         return;
     }
-    const StripRow* strip = findStrip(currentStripId_);
-    if (!strip) {
-        return;
-    }
-    gainLabel_->setText(QString("%1 dB").arg(value));
-    state_->setChannelGain(strip->outputId, strip->channelIndex, value);
+    state_->addInput(name.trimmed());
 }
 
-void MainWindow::onGainSliderPressed() {
-    if (const StripRow* strip = findStrip(currentStripId_)) {
-        state_->beginEdit(EditKey{strip->id, Field::Gain, -1});
-    }
-}
-
-void MainWindow::onGainSliderReleased() {
-    if (const StripRow* strip = findStrip(currentStripId_)) {
-        state_->endEdit(EditKey{strip->id, Field::Gain, -1});
-    }
-}
-
-void MainWindow::onMuteToggled(bool checked) {
-    if (suppressSignals_) {
-        return;
-    }
-    if (const StripRow* strip = findStrip(currentStripId_)) {
-        state_->setChannelMuted(strip->outputId, strip->channelIndex, checked);
-    }
-}
-
-void MainWindow::onAutoConnectToggled(bool checked) {
-    if (suppressSignals_) {
-        return;
-    }
-    if (const StripRow* strip = findStrip(currentStripId_)) {
-        state_->setOutputAutoConnect(strip->outputId, checked);
-    }
-}
-
-void MainWindow::onChannelPositionChanged(int index) {
-    if (suppressSignals_ || index < 0) {
-        return;
-    }
-    const StripRow* strip = findStrip(currentStripId_);
-    if (!strip) {
-        return;
-    }
-    const QString position = positionCombo_->itemData(index).toString();
-    if (position == strip->position) {
-        return;
-    }
-    state_->setChannelPosition(strip->outputId, strip->channelIndex, position);
-}
-
-// ------------------------------------------------------------------- EQ tab --
+// ------------------------------------------------------------------- EQ page --
 
 void MainWindow::onBandCountChanged(int count) {
     if (suppressSignals_) {
@@ -483,7 +348,7 @@ void MainWindow::onBandCountChanged(int count) {
     // The store re-requests the detail as part of this, so the table and curve
     // are redrawn by onChannelDetailUpdated rather than from a blocking read.
     state_->setChannelEqBandCount(strip->outputId, strip->channelIndex,
-                                  static_cast<uint32_t>(count));
+                                   static_cast<uint32_t>(count));
 }
 
 void MainWindow::rebuildBandTable(const std::vector<eqcore::EqBand>& bands) {
@@ -571,7 +436,7 @@ void MainWindow::onCurveBandEdited(int index, eqcore::EqBand band) {
     }
 
     // Mirror the drag into the numeric row without letting those spinboxes push
-    // their own update - one drag should be one write per event, not two.
+    // their own update - one drag event should be one write, not two.
     const bool wasSuppressed = suppressSignals_;
     suppressSignals_ = true;
     if (auto* freqSpin = qobject_cast<QDoubleSpinBox*>(bandTable_->cellWidget(index, 1))) {
@@ -585,10 +450,10 @@ void MainWindow::onCurveBandEdited(int index, eqcore::EqBand band) {
     }
     suppressSignals_ = wasSuppressed;
 
-    // One write per drag EVENT is fine now: the store coalesces them to at most
-    // 25 a second and flushes the final value on release. Previously this was a
-    // blocking round trip per mouse-move.
-    state_->setChannelEqBand(strip->outputId, strip->channelIndex, static_cast<uint32_t>(index), band);
+    // One write per drag EVENT is fine now: the store coalesces to at most 25 a
+    // second and flushes the final value on release.
+    state_->setChannelEqBand(strip->outputId, strip->channelIndex, static_cast<uint32_t>(index),
+                              band);
 }
 
 void MainWindow::onCurveBandEditBegan(int index) {
@@ -619,14 +484,14 @@ void MainWindow::onCopyEqClicked() {
         QString("Copy the %1-band curve from \"%2\" to:").arg(bands.size()).arg(source->label()),
         &dialog));
 
-    std::vector<std::pair<QCheckBox*, const StripRow*>> targets;
+    std::vector<std::pair<QCheckBox*, StripRow>> targets;
     for (const StripRow& strip : state_->strips()) {
         if (strip.id == source->id) {
             continue;
         }
         auto* check = new QCheckBox(strip.label(), &dialog);
         layout->addWidget(check);
-        targets.emplace_back(check, &strip);
+        targets.emplace_back(check, strip);
     }
     if (targets.empty()) {
         QMessageBox::information(this, "PipeEQ", "There is no other channel to copy the EQ to.");
@@ -648,129 +513,18 @@ void MainWindow::onCopyEqClicked() {
         }
         // Copies the band VALUES onto the target channel's own EQ instance
         // (created on demand). Deliberately a copy rather than sharing one
-        // instance: sharing is what the assignment matrix in the new UI is for,
-        // and doing it implicitly here would surprise anyone who then edited
-        // one side.
-        state_->setChannelEqBandCount(target->outputId, target->channelIndex,
-                                      static_cast<uint32_t>(bands.size()));
+        // instance: sharing is what the assignment matrix is for, and doing it
+        // implicitly here would surprise anyone who then edited one side.
+        state_->setChannelEqBandCount(target.outputId, target.channelIndex,
+                                       static_cast<uint32_t>(bands.size()));
         for (std::size_t i = 0; i < bands.size(); ++i) {
-            state_->setChannelEqBand(target->outputId, target->channelIndex,
+            state_->setChannelEqBand(target.outputId, target.channelIndex,
                                       static_cast<uint32_t>(i), bands[i]);
         }
     }
 }
 
-// ---------------------------------------------------------------- Mixer tab --
-
-void MainWindow::rebuildMixerTable() {
-    const StripRow* strip = findStrip(currentStripId_);
-
-    const bool wasSuppressed = suppressSignals_;
-    suppressSignals_ = true;
-
-    mixerTable_->setRowCount(state_->inputs().size());
-
-    QVector<QPair<QString, double>> sends;
-    if (strip) {
-        sends = state_->channelSends(strip->outputId, strip->channelIndex);
-    }
-
-    for (int row = 0; row < state_->inputs().size(); ++row) {
-        const InputRow& input = state_->inputs().at(row);
-
-        QString label = input.displayName;
-        if (!input.positions.isEmpty()) {
-            label += QString(" (%1 ch)").arg(input.positions.size());
-        }
-        auto* nameItem = new QTableWidgetItem(label);
-        nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
-        nameItem->setData(Qt::UserRole, input.id);
-        mixerTable_->setItem(row, 0, nameItem);
-
-        const auto found = std::find_if(sends.begin(), sends.end(), [&](const auto& send) {
-            return send.first == input.id;
-        });
-        const bool routed = found != sends.end();
-        const double levelDb = routed ? found->second : kOffLevelDb;
-
-        auto* onCheck = new QCheckBox(mixerTable_);
-        onCheck->setChecked(routed);
-        onCheck->setEnabled(strip != nullptr);
-        connect(onCheck, &QCheckBox::toggled, this, [this, row](bool) { pushMixerRow(row); });
-        mixerTable_->setCellWidget(row, 1, onCheck);
-
-        auto* levelSlider = new QSlider(Qt::Horizontal, mixerTable_);
-        levelSlider->setRange(kMinGainDb, kMaxGainDb);
-        levelSlider->setValue(static_cast<int>(std::lround(levelDb)));
-        levelSlider->setEnabled(strip != nullptr && routed);
-        connect(levelSlider, &QSlider::valueChanged, this, [this, row](int) { pushMixerRow(row); });
-        mixerTable_->setCellWidget(row, 2, levelSlider);
-    }
-
-    suppressSignals_ = wasSuppressed;
-}
-
-void MainWindow::pushMixerRow(int row) {
-    if (suppressSignals_) {
-        return;
-    }
-    const StripRow* strip = findStrip(currentStripId_);
-    if (!strip || row < 0 || row >= mixerTable_->rowCount()) {
-        return;
-    }
-
-    QTableWidgetItem* nameItem = mixerTable_->item(row, 0);
-    auto* onCheck = qobject_cast<QCheckBox*>(mixerTable_->cellWidget(row, 1));
-    auto* levelSlider = qobject_cast<QSlider*>(mixerTable_->cellWidget(row, 2));
-    if (!nameItem || !onCheck || !levelSlider) {
-        return;
-    }
-
-    const QString inputId = nameItem->data(Qt::UserRole).toString();
-    levelSlider->setEnabled(onCheck->isChecked());
-
-    if (!onCheck->isChecked()) {
-        state_->removeSend(strip->outputId, strip->channelIndex, inputId);
-        return;
-    }
-
-    // A refusal (almost always the per-output send limit) now comes back
-    // asynchronously as errorReported, which resyncs - so the switch corrects
-    // itself rather than being left on while doing nothing.
-    state_->setSend(strip->outputId, strip->channelIndex, inputId, levelSlider->value());
-}
-
-void MainWindow::onAddInputClicked() {
-    bool accepted = false;
-    const QString name =
-        QInputDialog::getText(this, "Add input", "Name for the new virtual sink:", QLineEdit::Normal,
-                               QString(), &accepted);
-    if (!accepted || name.trimmed().isEmpty()) {
-        return;
-    }
-    state_->addInput(name.trimmed());
-}
-
-void MainWindow::onRemoveInputClicked() {
-    const int row = mixerTable_->currentRow();
-    if (row < 0 || row >= mixerTable_->rowCount()) {
-        QMessageBox::information(this, "PipeEQ", "Select an input row in the table first.");
-        return;
-    }
-    QTableWidgetItem* nameItem = mixerTable_->item(row, 0);
-    if (!nameItem) {
-        return;
-    }
-    const auto answer = QMessageBox::question(
-        this, "Remove input",
-        QString("Remove \"%1\"? It will be dropped from every output's mix.").arg(nameItem->text()));
-    if (answer != QMessageBox::Yes) {
-        return;
-    }
-    state_->removeInput(nameItem->data(Qt::UserRole).toString());
-}
-
-// -------------------------------------------------------------- daemon events --
+// ------------------------------------------------------------- store events --
 
 void MainWindow::onTopologyChanged() {
     refreshDevices();
@@ -779,16 +533,17 @@ void MainWindow::onTopologyChanged() {
 }
 
 void MainWindow::onStripsUpdated() {
-    // Values moved but the set didn't: update labels and the controls in place
-    // and leave the band and mixer tables alone, so nothing is destroyed under
-    // a slider someone is dragging.
+    // Values moved but the set didn't: update in place and leave the band table
+    // alone, so nothing is destroyed under a control someone is using.
     updateStripStatus();
 }
 
 void MainWindow::onChannelDetailUpdated(const QString& outputId, uint32_t channelIndex) {
+    detailPanel_->refreshValues();
+
     const StripRow* strip = findStrip(currentStripId_);
     if (!strip || strip->outputId != outputId || strip->channelIndex != channelIndex) {
-        return; // detail for a channel that isn't on screen
+        return; // detail for a channel that isn't selected
     }
     const QVector<eqcore::EqBand> cached = state_->channelBands(outputId, channelIndex);
     const std::vector<eqcore::EqBand> bands(cached.begin(), cached.end());
@@ -800,7 +555,6 @@ void MainWindow::onChannelDetailUpdated(const QString& outputId, uint32_t channe
 
     rebuildBandTable(bands);
     curveWidget_->setBands(bands);
-    rebuildMixerTable();
 }
 
 void MainWindow::onErrorReported(const QString& message) {

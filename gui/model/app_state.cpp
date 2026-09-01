@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include <QSet>
+
 #include <nlohmann/json.hpp>
 
 #include "app_config.h"
@@ -23,6 +25,8 @@ AppState::AppState(bool demo, QObject* parent) : QObject(parent) {
     qRegisterMetaType<QVector<MeterRow>>();
     qRegisterMetaType<QVector<eqcore::EqBand>>("QVector<eqcore::EqBand>");
     qRegisterMetaType<QVector<QPair<QString, double>>>("QVector<QPair<QString,double>>");
+    qRegisterMetaType<SendEntry>();
+    qRegisterMetaType<QVector<SendEntry>>("QVector<SendEntry>");
 
     worker_ = new BackendWorker(demo);
     worker_->moveToThread(&workerThread_);
@@ -33,12 +37,14 @@ AppState::AppState(bool demo, QObject* parent) : QObject(parent) {
     connect(worker_, &BackendWorker::availabilityChanged, this, &AppState::availabilityChanged);
     connect(worker_, &BackendWorker::channelDetailReady, this,
             [this](const QString& outputId, uint32_t channelIndex,
-                    const QVector<eqcore::EqBand>& bands,
-                    const QVector<QPair<QString, double>>& sends) {
-                ChannelDetail& detail = details_[detailKey(outputId, channelIndex)];
-                detail.bands = bands;
-                detail.sends = sends;
+                    const QVector<eqcore::EqBand>& bands) {
+                details_[detailKey(outputId, channelIndex)].bands = bands;
                 emit channelDetailUpdated(outputId, channelIndex);
+            });
+    connect(worker_, &BackendWorker::outputSendsReady, this,
+            [this](const QString& outputId, const QVector<SendEntry>& sends) {
+                sends_.insert(outputId, sends);
+                emit sendsUpdated(outputId);
             });
 
     // Every daemon change notification becomes a resync request. Coarse, but
@@ -103,13 +109,48 @@ QVector<eqcore::EqBand> AppState::channelBands(const QString& outputId, uint32_t
 
 QVector<QPair<QString, double>> AppState::channelSends(const QString& outputId,
                                                         uint32_t channelIndex) const {
-    const auto it = details_.constFind(detailKey(outputId, channelIndex));
-    return it == details_.constEnd() ? QVector<QPair<QString, double>>{} : it->sends;
+    QVector<QPair<QString, double>> result;
+    const auto it = sends_.constFind(outputId);
+    if (it == sends_.constEnd()) {
+        return result;
+    }
+    for (const SendEntry& entry : *it) {
+        if (entry.channelIndex == channelIndex) {
+            result.push_back({entry.inputId, entry.gainDb});
+        }
+    }
+    return result;
+}
+
+bool AppState::inputOccupiesSlot(const QString& outputId, const QString& inputId) const {
+    const auto it = sends_.constFind(outputId);
+    if (it == sends_.constEnd()) {
+        return false;
+    }
+    return std::any_of(it->begin(), it->end(),
+                        [&](const SendEntry& entry) { return entry.inputId == inputId; });
+}
+
+int AppState::routedInputCount(const QString& outputId) const {
+    const auto it = sends_.constFind(outputId);
+    if (it == sends_.constEnd()) {
+        return 0;
+    }
+    QSet<QString> ids;
+    for (const SendEntry& entry : *it) {
+        ids.insert(entry.inputId);
+    }
+    return static_cast<int>(ids.size());
 }
 
 void AppState::requestChannelDetail(const QString& outputId, uint32_t channelIndex) {
     QMetaObject::invokeMethod(worker_, "requestChannelDetail", Qt::QueuedConnection,
                                Q_ARG(QString, outputId), Q_ARG(uint32_t, channelIndex));
+}
+
+void AppState::requestOutputSends(const QString& outputId) {
+    QMetaObject::invokeMethod(worker_, "requestOutputSends", Qt::QueuedConnection,
+                               Q_ARG(QString, outputId));
 }
 
 void AppState::refresh() {
@@ -262,6 +303,13 @@ void AppState::setSend(const QString& outputId, uint32_t channelIndex, const QSt
 
     const QString key = outputId + "#" + QString::number(channelIndex) + ":" + inputId;
     enqueue(op, EditKey{key, Field::Send, -1}, /*flushNow=*/false);
+
+    // Optimistic: reflect the level locally so the fader tracks the pointer.
+    for (SendEntry& entry : sends_[outputId]) {
+        if (entry.channelIndex == channelIndex && entry.inputId == inputId) {
+            entry.gainDb = gainDb;
+        }
+    }
 }
 
 void AppState::setChannelEqBand(const QString& outputId, uint32_t channelIndex, uint32_t bandIndex,
@@ -334,6 +382,7 @@ void AppState::removeSend(const QString& outputId, uint32_t channelIndex, const 
     op.stringArg = inputId;
     const QString key = outputId + "#" + QString::number(channelIndex) + ":" + inputId;
     enqueue(op, EditKey{key, Field::Send, -1}, /*flushNow=*/true);
+    requestOutputSends(outputId);
 }
 
 // ----------------------------------------------------------------- topology --

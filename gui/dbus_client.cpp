@@ -442,9 +442,8 @@ bool DbusClient::removeSend(const QString& outputId, uint32_t channelIndex, cons
     }
 }
 
-std::vector<std::pair<QString, double>> DbusClient::getChannelSends(const QString& outputId,
-                                                                     uint32_t channelIndex) {
-    std::vector<std::pair<QString, double>> result;
+QVector<SendEntry> DbusClient::getOutputSends(const QString& outputId) {
+    QVector<SendEntry> result;
     if (!proxy_) {
         return result;
     }
@@ -455,10 +454,8 @@ std::vector<std::pair<QString, double>> DbusClient::getChannelSends(const QStrin
             .withArguments(outputId.toStdString())
             .storeResultsTo(rows);
         for (const auto& r : rows) {
-            if (std::get<0>(r) != channelIndex) {
-                continue;
-            }
-            result.emplace_back(QString::fromStdString(std::get<1>(r)), std::get<2>(r));
+            result.push_back(SendEntry{std::get<0>(r), QString::fromStdString(std::get<1>(r)),
+                                        std::get<2>(r)});
         }
     } catch (const sdbus::Error& e) {
         qWarning("pipeeq-gui: GetSends failed: %s", e.what());

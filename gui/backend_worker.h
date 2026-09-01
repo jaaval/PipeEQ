@@ -34,6 +34,7 @@ public slots:
     // to issue per selection change.
     void requestSnapshot();
     void requestChannelDetail(const QString& outputId, uint32_t channelIndex);
+    void requestOutputSends(const QString& outputId);
     void applyWrites(const QVector<WriteOp>& ops);
     void setMeteringEnabled(bool enabled);
 
@@ -48,8 +49,8 @@ public slots:
 signals:
     void snapshotReady(const DaemonSnapshot& snapshot);
     void channelDetailReady(const QString& outputId, uint32_t channelIndex,
-                             const QVector<eqcore::EqBand>& bands,
-                             const QVector<QPair<QString, double>>& sends);
+                             const QVector<eqcore::EqBand>& bands);
+    void outputSendsReady(const QString& outputId, const QVector<SendEntry>& sends);
     // seq identifies the batch; ok is false if any write in it was refused, in
     // which case the caller resyncs rather than trusting its optimistic value.
     void writesCompleted(quint64 seq, bool ok, const QString& error);
@@ -62,6 +63,10 @@ signals:
     void daemonInputsChanged();
     void daemonDevicesChanged();
     void metersReceived(const QVector<MeterRow>& outputs, const QVector<MeterRow>& inputs);
+
+private:
+public:
+    int maxSendsPerOutput() const { return backend_ ? backend_->maxSendsPerOutput() : 8; }
 
 private:
     bool demo_;

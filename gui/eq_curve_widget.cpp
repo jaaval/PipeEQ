@@ -18,13 +18,32 @@ EqCurveWidget::EqCurveWidget(QWidget* parent) : QWidget(parent) {
     setMouseTracking(true);
 }
 
+void EqCurveWidget::setPreviewMode(bool preview) {
+    preview_ = preview;
+    maxGainDb_ = preview ? 18.0 : 24.0;
+    setMinimumHeight(preview ? 56 : 160);
+    setMouseTracking(!preview);
+    update();
+}
+
+void EqCurveWidget::setSampleRateHz(double sampleRateHz) {
+    if (sampleRateHz <= 0.0) {
+        sampleRateHz = kDefaultSampleRateHz;
+    }
+    if (qFuzzyCompare(sampleRateHz_, sampleRateHz)) {
+        return;
+    }
+    sampleRateHz_ = sampleRateHz;
+    update();
+}
+
 void EqCurveWidget::setBands(const std::vector<eqcore::EqBand>& bands) {
     bands_ = bands;
     update();
 }
 
 QRectF EqCurveWidget::plotRect() const {
-    constexpr double margin = 12.0;
+    const double margin = preview_ ? 3.0 : 12.0;
     return QRectF(margin, margin, width() - 2 * margin, height() - 2 * margin);
 }
 
@@ -45,7 +64,7 @@ double EqCurveWidget::xToFreq(double x) const {
 }
 
 double EqCurveWidget::gainToY(double gainDb) const {
-    const double t = (std::clamp(gainDb, -kMaxGainDb, kMaxGainDb) + kMaxGainDb) / (2.0 * kMaxGainDb);
+    const double t = (std::clamp(gainDb, -maxGainDb_, maxGainDb_) + maxGainDb_) / (2.0 * maxGainDb_);
     const QRectF r = plotRect();
     return r.bottom() - t * r.height();
 }
@@ -53,7 +72,7 @@ double EqCurveWidget::gainToY(double gainDb) const {
 double EqCurveWidget::yToGain(double y) const {
     const QRectF r = plotRect();
     const double t = std::clamp((r.bottom() - y) / r.height(), 0.0, 1.0);
-    return t * 2.0 * kMaxGainDb - kMaxGainDb;
+    return t * 2.0 * maxGainDb_ - maxGainDb_;
 }
 
 int EqCurveWidget::hitTestBand(QPointF pos) const {
@@ -84,14 +103,16 @@ void EqCurveWidget::paintEvent(QPaintEvent* /*event*/) {
     painter.setPen(QPen(tokens.border, 1));
     painter.drawRect(r);
 
-    painter.setPen(QPen(tokens.gridLine, 1, Qt::DotLine));
-    for (double freq : {100.0, 1000.0, 10000.0}) {
-        const double x = freqToX(freq);
-        painter.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()));
-    }
-    for (double gain : {-12.0, 0.0, 12.0}) {
-        const double y = gainToY(gain);
-        painter.drawLine(QPointF(r.left(), y), QPointF(r.right(), y));
+    if (!preview_) {
+        painter.setPen(QPen(tokens.gridLine, 1, Qt::DotLine));
+        for (double freq : {100.0, 1000.0, 10000.0}) {
+            const double x = freqToX(freq);
+            painter.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()));
+        }
+        for (double gain : {-12.0, 0.0, 12.0}) {
+            const double y = gainToY(gain);
+            painter.drawLine(QPointF(r.left(), y), QPointF(r.right(), y));
+        }
     }
     painter.setPen(QPen(tokens.textDim, 1.5));
     painter.drawLine(QPointF(r.left(), gainToY(0.0)), QPointF(r.right(), gainToY(0.0)));
@@ -105,7 +126,7 @@ void EqCurveWidget::paintEvent(QPaintEvent* /*event*/) {
             freqs[static_cast<std::size_t>(i)] = xToFreq(r.left() + i);
         }
         std::vector<double> responseDb(freqs.size(), 0.0);
-        eqcore::eqResponseCurveDb(bands_, freqs, kSampleRateHz, responseDb);
+        eqcore::eqResponseCurveDb(bands_, freqs, sampleRateHz_, responseDb);
 
         QPainterPath path;
         for (int i = 0; i <= steps; ++i) {
@@ -132,7 +153,9 @@ void EqCurveWidget::paintEvent(QPaintEvent* /*event*/) {
         painter.drawPath(path);
     }
 
-    for (std::size_t i = 0; i < bands_.size(); ++i) {
+    // No handles in preview mode: they would be unusable at that size and just
+    // add visual noise.
+    for (std::size_t i = 0; preview_ ? false : i < bands_.size(); ++i) {
         const QPointF p(freqToX(bands_[i].freqHz), gainToY(bands_[i].gainDb));
         painter.setBrush(tokens.handle);
         painter.setPen(QPen(tokens.text, 1));
@@ -143,7 +166,14 @@ void EqCurveWidget::paintEvent(QPaintEvent* /*event*/) {
 }
 
 void EqCurveWidget::mousePressEvent(QMouseEvent* event) {
+    if (preview_) {
+        event->ignore(); // let the EqPreview host handle the click
+        return;
+    }
     draggingIndex_ = hitTestBand(event->position());
+    if (draggingIndex_ >= 0) {
+        emit bandEditBegan(draggingIndex_);
+    }
 }
 
 void EqCurveWidget::mouseMoveEvent(QMouseEvent* event) {
@@ -152,16 +182,27 @@ void EqCurveWidget::mouseMoveEvent(QMouseEvent* event) {
     }
     eqcore::EqBand& band = bands_[static_cast<std::size_t>(draggingIndex_)];
     band.freqHz = xToFreq(event->position().x());
-    band.gainDb = std::clamp(yToGain(event->position().y()), -kMaxGainDb, kMaxGainDb);
+    band.gainDb = std::clamp(yToGain(event->position().y()), -maxGainDb_, maxGainDb_);
     update();
     emit bandEdited(draggingIndex_, band);
 }
 
-void EqCurveWidget::mouseReleaseEvent(QMouseEvent* /*event*/) {
+void EqCurveWidget::mouseReleaseEvent(QMouseEvent* event) {
+    if (preview_) {
+        event->ignore();
+        return;
+    }
+    if (draggingIndex_ >= 0) {
+        emit bandEditFinished(draggingIndex_);
+    }
     draggingIndex_ = -1;
 }
 
 void EqCurveWidget::wheelEvent(QWheelEvent* event) {
+    if (preview_) {
+        event->ignore();
+        return;
+    }
     const int index = hitTestBand(event->position());
     if (index < 0) {
         return;
@@ -170,7 +211,9 @@ void EqCurveWidget::wheelEvent(QWheelEvent* event) {
     const double steps = event->angleDelta().y() / 120.0;
     band.q = std::clamp(band.q * std::pow(1.1, steps), 0.1, 10.0);
     update();
+    emit bandEditBegan(index);
     emit bandEdited(index, band);
+    emit bandEditFinished(index);
 }
 
 } // namespace pipeeq

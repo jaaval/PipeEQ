@@ -92,6 +92,10 @@ struct DaemonSnapshot {
     QVector<StripRow> strips;
     QVector<InputRow> inputs;
     bool available = false;
+    // The per-output send-slot limit, reported rather than assumed so the UI can
+    // show "4/8 used" instead of letting someone switch on a send the daemon
+    // will refuse.
+    int maxSendsPerOutput = 8;
 };
 
 } // namespace pipeeq

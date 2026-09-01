@@ -55,8 +55,8 @@ public:
                   double gainDb) override;
     bool removeSend(const QString& outputId, uint32_t channelIndex,
                      const QString& inputId) override;
-    std::vector<std::pair<QString, double>> getChannelSends(const QString& outputId,
-                                                             uint32_t channelIndex) override;
+    QVector<SendEntry> getOutputSends(const QString& outputId) override;
+    int maxSendsPerOutput() const override { return 8; }
 
     void setMeteringEnabled(bool enabled) override;
 

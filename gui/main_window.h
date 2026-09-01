@@ -7,17 +7,17 @@
 #include "eq_curve_widget.h"
 #include "model/app_state.h"
 
-class QComboBox;
-class QPushButton;
 class QCheckBox;
-class QSlider;
+class QComboBox;
 class QLabel;
+class QPushButton;
 class QSpinBox;
+class QStackedWidget;
 class QTableWidget;
-class QTabWidget;
 
 namespace pipeeq {
 
+class DetailPanel;
 class StripRack;
 
 // Transitional window: the same layout as before, but a row in the left-hand
@@ -37,19 +37,12 @@ private slots:
     void onAddOutputClicked();
     void onRemoveOutputClicked();
     void onRackSelectionChanged(const QString& stripId);
-    void onGainSliderChanged(int value);
-    void onGainSliderPressed();
-    void onGainSliderReleased();
-    void onMuteToggled(bool checked);
-    void onAutoConnectToggled(bool checked);
-    void onChannelPositionChanged(int index);
     void onBandCountChanged(int count);
     void onCurveBandEdited(int index, eqcore::EqBand band);
     void onCurveBandEditBegan(int index);
     void onCurveBandEditFinished(int index);
     void onCopyEqClicked();
     void onAddInputClicked();
-    void onRemoveInputClicked();
     void onTopologyChanged();
     void onStripsUpdated();
     void onChannelDetailUpdated(const QString& outputId, uint32_t channelIndex);
@@ -59,6 +52,7 @@ private slots:
     void refreshInputs();
 
 private:
+    void applyDetailSizing(int pageIndex);
     void selectStrip(const QString& stripId);
     void loadStripDetail(const StripRow& strip);
     // Refreshes only what can change without the strip set changing (labels,
@@ -66,16 +60,8 @@ private:
     // tables alone - rebuilding those on a refresh would yank widgets out from
     // under a slider the user is dragging.
     void updateStripStatus();
-    // Fills the position dropdown with the channel positions the selected
-    // strip's device advertises, and selects the one it currently claims.
-    void rebuildPositionCombo(const StripRow& strip);
-    // True when the strip's output is connected but this particular channel
-    // isn't driven - a channel the device's current profile doesn't offer.
-    bool channelUnavailable(const StripRow& strip) const;
     void rebuildBandTable(const std::vector<eqcore::EqBand>& bands);
-    void rebuildMixerTable();
     void pushBandRow(int row);
-    void pushMixerRow(int row);
     const StripRow* findStrip(const QString& stripId) const;
     // The device row for a strip's target, or null when it isn't present.
     const DeviceRow* findDevice(const QString& nodeName) const;
@@ -83,29 +69,18 @@ private:
     AppState* state_;
 
     StripRack* stripRack_ = nullptr;
+    DetailPanel* detailPanel_ = nullptr;
+    QStackedWidget* detailStack_ = nullptr;
     QComboBox* deviceCombo_ = nullptr;
     QPushButton* addButton_ = nullptr;
     QPushButton* removeButton_ = nullptr;
 
-    QCheckBox* muteCheck_ = nullptr;
-    QCheckBox* autoConnectCheck_ = nullptr;
-    QComboBox* positionCombo_ = nullptr;
-    QLabel* positionLabel_ = nullptr;
-    QSlider* gainSlider_ = nullptr;
-    QLabel* gainLabel_ = nullptr;
-    QTabWidget* detailTabs_ = nullptr;
-
-    // EQ tab.
+    // The EQ editor page. Replaced wholesale by the real editor, with its
+    // instance list and channel-assignment matrix, in the next phase.
     QSpinBox* bandCountSpin_ = nullptr;
     QPushButton* copyEqButton_ = nullptr;
     QTableWidget* bandTable_ = nullptr;
     EqCurveWidget* curveWidget_ = nullptr;
-
-    // Mixer tab: one row per known input, each with an on/off checkbox and a
-    // level slider scoped to whichever channel is currently selected.
-    QPushButton* addInputButton_ = nullptr;
-    QPushButton* removeInputButton_ = nullptr;
-    QTableWidget* mixerTable_ = nullptr;
 
     QLabel* statusLabel_ = nullptr;
 

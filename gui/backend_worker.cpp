@@ -44,6 +44,7 @@ void BackendWorker::requestSnapshot() {
     for (const StripRow& strip : backend_->listStrips()) {
         snapshot.strips.push_back(strip);
     }
+    snapshot.maxSendsPerOutput = backend_->maxSendsPerOutput();
     for (const InputRow& input : backend_->listInputs()) {
         snapshot.inputs.push_back(input);
     }
@@ -58,11 +59,14 @@ void BackendWorker::requestChannelDetail(const QString& outputId, uint32_t chann
     for (const eqcore::EqBand& band : backend_->getChannelEqBands(outputId, channelIndex)) {
         bands.push_back(band);
     }
-    QVector<QPair<QString, double>> sends;
-    for (const auto& [inputId, gainDb] : backend_->getChannelSends(outputId, channelIndex)) {
-        sends.push_back({inputId, gainDb});
+    emit channelDetailReady(outputId, channelIndex, bands);
+}
+
+void BackendWorker::requestOutputSends(const QString& outputId) {
+    if (!backend_) {
+        return;
     }
-    emit channelDetailReady(outputId, channelIndex, bands, sends);
+    emit outputSendsReady(outputId, backend_->getOutputSends(outputId));
 }
 
 void BackendWorker::applyWrites(const QVector<WriteOp>& ops) {

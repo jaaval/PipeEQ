@@ -60,12 +60,17 @@ public:
                   double gainDb) override;
     bool removeSend(const QString& outputId, uint32_t channelIndex,
                      const QString& inputId) override;
-    std::vector<std::pair<QString, double>> getChannelSends(const QString& outputId,
-                                                             uint32_t channelIndex) override;
+    QVector<SendEntry> getOutputSends(const QString& outputId) override;
+    int maxSendsPerOutput() const override { return kMaxSendsPerOutput; }
 
     void setMeteringEnabled(bool enabled) override;
 
 private:
+    // Mirrors the daemon's kMaxInputs. Not discoverable over the bus today; if
+    // that limit ever becomes configurable it needs to be reported instead of
+    // duplicated here.
+    static constexpr int kMaxSendsPerOutput = 8;
+
     std::unique_ptr<sdbus::IProxy> proxy_;
 };
 

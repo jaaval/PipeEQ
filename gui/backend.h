@@ -60,6 +60,14 @@ struct InputRow {
     QVector<QString> positions;
 };
 
+// One routed (channel, input) pair of an output. A pair that is absent from the
+// list is not routed at all, which is deliberately distinct from a 0 dB send.
+struct SendEntry {
+    uint32_t channelIndex = 0;
+    QString inputId;
+    double gainDb = 0.0;
+};
+
 // Per-channel peak levels for one output, in dB.
 struct MeterRow {
     QString id;
@@ -113,10 +121,17 @@ public:
                           double gainDb) = 0;
     virtual bool removeSend(const QString& outputId, uint32_t channelIndex,
                              const QString& inputId) = 0;
-    // Only inputs actually routed to this channel appear; one this channel
-    // doesn't hear at all is simply absent, which is distinct from 0 dB.
-    virtual std::vector<std::pair<QString, double>> getChannelSends(const QString& outputId,
-                                                                     uint32_t channelIndex) = 0;
+    // The whole send matrix for one output, in one call.
+    //
+    // Per output rather than per channel because the daemon returns it that way
+    // anyway, and because the send-slot limit is a per-OUTPUT bound on distinct
+    // inputs - which cannot be computed from a single channel's sends.
+    virtual QVector<SendEntry> getOutputSends(const QString& outputId) = 0;
+
+    // The most distinct inputs one output can send from, so the UI can show the
+    // limit rather than letting a user switch on a send that silently does
+    // nothing. The daemon refuses past this.
+    virtual int maxSendsPerOutput() const = 0;
 
     // Arms or disarms level reporting. The daemon's lease expires on its own,
     // so a watcher re-arms periodically rather than relying on a clean
@@ -140,3 +155,4 @@ Q_DECLARE_METATYPE(pipeeq::DeviceRow)
 Q_DECLARE_METATYPE(pipeeq::StripRow)
 Q_DECLARE_METATYPE(pipeeq::InputRow)
 Q_DECLARE_METATYPE(pipeeq::MeterRow)
+Q_DECLARE_METATYPE(pipeeq::SendEntry)

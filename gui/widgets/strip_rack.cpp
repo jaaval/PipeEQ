@@ -4,6 +4,7 @@
 
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QFontMetrics>
 #include <QScrollBar>
 #include <QVBoxLayout>
 
@@ -26,7 +27,8 @@ StripRack::StripRack(AppState* state, QWidget* parent) : QScrollArea(parent), st
     contentLayout_->addStretch(1);
     setWidget(content_);
 
-    setMinimumHeight(270);
+    // The owner sets the real height; this is only a floor for a bare instance.
+    setMinimumHeight(150);
 }
 
 QVector<StripRack::StripCluster> StripRack::buildClusters() const {
@@ -132,10 +134,21 @@ void StripRack::rebuild() {
         } else if (!first.driven) {
             status = " · CH N/A";
         }
-        auto* header = new QLabel(first.outputName + status, deviceBlock);
+        // Elided to a cap. A PipeWire description like "GB203 High Definition
+        // Audio Controller Digital Stereo (HDMI)" is far wider than the strips
+        // beneath it; left alone it stretched a single strip to several times
+        // its natural width. The cap plus the trailing stretch below means a
+        // long name widens the BLOCK a little but never the strips, and the
+        // full name is in the tooltip.
         QFont headerFont = tokens.uiFont;
         headerFont.setBold(true);
+        const QFontMetrics headerMetrics(headerFont);
+        constexpr int kMaxHeaderPx = 210;
+        auto* header = new QLabel(
+            headerMetrics.elidedText(first.outputName, Qt::ElideRight, kMaxHeaderPx) + status,
+            deviceBlock);
         header->setFont(headerFont);
+        header->setToolTip(first.outputName + "\n" + first.deviceName);
         const QColor accent = tokens.accentForDevice(first.deviceName);
         header->setStyleSheet(
             QString("color: %1;").arg(first.connected ? accent.name() : tokens.textDisabled.name()));
@@ -145,6 +158,9 @@ void StripRack::rebuild() {
         deviceStripsLayout = new QHBoxLayout(stripsRow);
         deviceStripsLayout->setContentsMargins(0, 0, 0, 0);
         deviceStripsLayout->setSpacing(4);
+        // Trailing stretch, so strips keep their natural width instead of
+        // expanding to fill whatever the block happens to be.
+        deviceStripsLayout->addStretch(1);
         blockLayout->addWidget(stripsRow, 1);
 
         // Insert before the trailing stretch.
@@ -170,7 +186,7 @@ void StripRack::rebuild() {
         strip->setSelected(cluster.members.front().id == selectedStripId_ ||
                             std::any_of(cluster.members.begin(), cluster.members.end(),
                                         [&](const StripRow& m) { return m.id == selectedStripId_; }));
-        deviceStripsLayout->addWidget(strip);
+        deviceStripsLayout->insertWidget(deviceStripsLayout->count() - 1, strip);
         strip->show();
         kept.insert(cluster.key, strip);
     }
