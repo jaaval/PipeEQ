@@ -60,7 +60,10 @@ AppState::AppState(bool demo, QObject* parent) : QObject(parent) {
                 meters_.ingest(outputs, inputs);
             });
 
-    connect(&coalescer_, &WriteCoalescer::writesReady, worker_, &BackendWorker::applyWrites);
+    // Routed through the store rather than straight to the worker, so it can
+    // record which channels a batch touches and re-read them once the write has
+    // actually landed.
+    connect(&coalescer_, &WriteCoalescer::writesReady, this, &AppState::onWritesReady);
 
     workerThread_.start();
     QMetaObject::invokeMethod(worker_, &BackendWorker::initialize, Qt::QueuedConnection);
@@ -159,10 +162,17 @@ void AppState::refresh() {
 }
 
 void AppState::onSnapshotReady(const DaemonSnapshot& snapshot) {
+    // Grouping is part of the topology, not a value.
+    //
+    // Linking two channels leaves the set of strip IDS identical and only moves
+    // their groupId - so keying the comparison on ids alone reported a mere
+    // value update, and the rack, which groups linked channels into one widget,
+    // had nothing to rebuild from. Linking and unlinking appeared to do nothing
+    // at all.
     const auto stripIds = [](const QVector<StripRow>& strips) {
         QStringList ids;
         for (const StripRow& strip : strips) {
-            ids << strip.id;
+            ids << (strip.id + "/" + strip.groupId);
         }
         return ids;
     };
@@ -245,6 +255,24 @@ void AppState::enqueue(const WriteOp& op, const EditKey& key, bool flushNow) {
     }
 }
 
+void AppState::onWritesReady(const QVector<WriteOp>& ops) {
+    quint64 highestSeq = 0;
+    QVector<ChannelTarget> targets;
+    for (const WriteOp& op : ops) {
+        highestSeq = std::max(highestSeq, op.seq);
+        const ChannelTarget target{op.outputId, op.channelIndex};
+        if (!targets.contains(target)) {
+            targets.push_back(target);
+        }
+    }
+    if (highestSeq != 0) {
+        inFlightTargets_.insert(highestSeq, targets);
+    }
+
+    QMetaObject::invokeMethod(worker_, "applyWrites", Qt::QueuedConnection,
+                               Q_ARG(QVector<WriteOp>, ops));
+}
+
 void AppState::onWritesCompleted(quint64 seq, bool ok, const QString& error) {
     // Every batch with a sequence at or below this one has been applied.
     for (auto it = inFlight_.begin(); it != inFlight_.end();) {
@@ -256,6 +284,25 @@ void AppState::onWritesCompleted(quint64 seq, bool ok, const QString& error) {
             guard_.noteWriteCompleted(key);
         }
         it = inFlight_.erase(it);
+    }
+
+    // Re-read whatever the batch touched. The optimistic local update keeps the
+    // UI responsive during a drag, but it is a guess: only the backend knows
+    // whether the value was clamped, refused, or applied to a whole link group.
+    // Converging here is what stops a stale cache surviving indefinitely.
+    for (auto it = inFlightTargets_.begin(); it != inFlightTargets_.end();) {
+        if (it.key() > seq) {
+            ++it;
+            continue;
+        }
+        for (const ChannelTarget& target : *it) {
+            if (target.outputId.isEmpty()) {
+                continue;
+            }
+            requestChannelDetail(target.outputId, target.channelIndex);
+            requestOutputSends(target.outputId);
+        }
+        it = inFlightTargets_.erase(it);
     }
 
     if (!ok) {

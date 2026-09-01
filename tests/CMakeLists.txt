@@ -62,4 +62,23 @@ if(TARGET pipeeq-gui)
     target_include_directories(test_gui_model PRIVATE ${CMAKE_SOURCE_DIR}/gui)
     target_link_libraries(test_gui_model PRIVATE pipeeq_test_support eqcore Qt6::Widgets)
     add_test(NAME test_gui_model COMMAND test_gui_model)
+
+    # Drives the store end-to-end against the demo backend, including the
+    # cross-thread hand-off to the backend worker - the seam where a call can
+    # silently do nothing while every component looks correct in isolation.
+    add_executable(test_app_state
+        test_app_state.cpp
+        ${CMAKE_SOURCE_DIR}/gui/backend.cpp
+        ${CMAKE_SOURCE_DIR}/gui/backend_worker.cpp
+        ${CMAKE_SOURCE_DIR}/gui/dbus_client.cpp
+        ${CMAKE_SOURCE_DIR}/gui/fake_backend.cpp
+        ${CMAKE_SOURCE_DIR}/gui/model/app_state.cpp
+        ${CMAKE_SOURCE_DIR}/gui/model/edit_guard.cpp
+        ${CMAKE_SOURCE_DIR}/gui/model/level_meters.cpp
+        ${CMAKE_SOURCE_DIR}/gui/model/write_coalescer.cpp
+    )
+    target_include_directories(test_app_state PRIVATE ${CMAKE_SOURCE_DIR}/gui)
+    target_link_libraries(test_app_state
+        PRIVATE pipeeq_test_support eqcore Qt6::Widgets SDBusCpp::sdbus-c++)
+    add_test(NAME test_app_state COMMAND test_app_state)
 endif()

@@ -10,6 +10,14 @@ WriteCoalescer::WriteCoalescer(QObject* parent) : QObject(parent) {
 }
 
 void WriteCoalescer::enqueue(const WriteOp& op) {
+    // Drop any pending write this one invalidates, before queueing it. Without
+    // this, an ordered op and a coalesced op that contradict each other both go
+    // out - ordered first - and the coalesced one wins.
+    if (const QString superseded = op.supersedesCoalesceKey(); !superseded.isEmpty()) {
+        latest_.remove(superseded);
+        latestOrder_.removeAll(superseded);
+    }
+
     if (op.coalescable()) {
         const QString key = op.coalesceKey();
         if (!latest_.contains(key)) {

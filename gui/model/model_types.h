@@ -81,6 +81,23 @@ struct WriteOp {
         return QString::number(static_cast<int>(kind)) + "/" + outputId + "/" +
                QString::number(channelIndex) + "/" + stringArg + "/" + QString::number(uintArg);
     }
+
+    // The coalesce key of a pending op that this one INVALIDATES, or empty.
+    //
+    // Ordered ops flush before coalesced ones, which is right for
+    // "set band count, then set band" - but wrong when the ordered op undoes
+    // what the coalesced one does. Switching a send off while a level write from
+    // the fader was still pending sent [RemoveSend, Send], so the send switched
+    // itself straight back on.
+    QString supersedesCoalesceKey() const {
+        if (kind != Kind::RemoveSend) {
+            return {};
+        }
+        WriteOp asSend = *this;
+        asSend.kind = Kind::Send;
+        asSend.uintArg = 0;
+        return asSend.coalesceKey();
+    }
 };
 
 // Everything one read round trip returns. Fetched in one go rather than

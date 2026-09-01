@@ -413,6 +413,25 @@ void StripRack::rebuild() {
 
 void StripRack::refreshValues() {
     const QVector<StripCluster> clusters = buildClusters();
+
+    // If the CLUSTERING changed - a group formed or dissolved - the existing
+    // widgets no longer correspond to anything, because a cluster key contains
+    // the group id. Updating values into widgets found by key would then be a
+    // silent no-op, which is exactly how linking managed to look broken.
+    bool clusteringChanged = clusters.size() != stripWidgets_.size();
+    if (!clusteringChanged) {
+        for (const StripCluster& cluster : clusters) {
+            if (!stripWidgets_.contains(cluster.key)) {
+                clusteringChanged = true;
+                break;
+            }
+        }
+    }
+    if (clusteringChanged) {
+        rebuild();
+        return;
+    }
+
     for (const StripCluster& cluster : clusters) {
         if (ChannelStrip* strip = stripWidgets_.value(cluster.key, nullptr)) {
             strip->setStrips(cluster.members);

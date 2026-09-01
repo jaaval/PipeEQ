@@ -117,6 +117,7 @@ private:
     QString detailKey(const QString& outputId, uint32_t channelIndex) const;
     void enqueue(const WriteOp& op, const EditKey& key, bool flushNow);
     void onSnapshotReady(const DaemonSnapshot& snapshot);
+    void onWritesReady(const QVector<WriteOp>& ops);
     void onWritesCompleted(quint64 seq, bool ok, const QString& error);
 
     // A slow safety resync. The daemon does emit change signals now, but one
@@ -146,6 +147,16 @@ private:
     // Maps a batch back to the keys it wrote, so completion can clear exactly
     // those pending counts.
     QHash<quint64, QVector<EditKey>> inFlight_;
+    // The (output, channel) pairs a batch touched, so the cached detail can be
+    // re-read once the write is known to have landed. Without this, a coalesced
+    // write followed by any read returns the value from BEFORE the write, and
+    // the cache keeps it until something else happens to refresh.
+    struct ChannelTarget {
+        QString outputId;
+        uint32_t channelIndex = 0;
+        bool operator==(const ChannelTarget&) const = default;
+    };
+    QHash<quint64, QVector<ChannelTarget>> inFlightTargets_;
     quint64 nextSeq_ = 1;
     bool meteringWanted_ = false;
 };

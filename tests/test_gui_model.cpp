@@ -173,6 +173,69 @@ void testStructuralOpsFlushBeforeCoalescedOnes() {
 
 // Releasing a control must land its final value immediately rather than waiting
 // out the interval.
+WriteOp sendOp(const QString& outputId, uint32_t channel, const QString& inputId, double gainDb) {
+    WriteOp op;
+    op.kind = WriteOp::Kind::Send;
+    op.outputId = outputId;
+    op.channelIndex = channel;
+    op.stringArg = inputId;
+    op.doubleArg = gainDb;
+    return op;
+}
+
+WriteOp removeSendOp(const QString& outputId, uint32_t channel, const QString& inputId) {
+    WriteOp op;
+    op.kind = WriteOp::Kind::RemoveSend;
+    op.outputId = outputId;
+    op.channelIndex = channel;
+    op.stringArg = inputId;
+    return op;
+}
+
+// Ordered ops flush before coalesced ones, which is right for "set band count,
+// then set band" - and wrong when the ordered op UNDOES the coalesced one.
+// Switching a send off while a level write from the fader is still pending would
+// otherwise emit [RemoveSend, Send] and the send would switch straight back on.
+void testRemoveSendCancelsPendingLevelWrite() {
+    WriteCoalescer coalescer;
+    QVector<WriteOp> sent;
+    QObject::connect(&coalescer, &WriteCoalescer::writesReady,
+                     [&](const QVector<WriteOp>& ops) { sent.append(ops); });
+
+    coalescer.enqueue(sendOp("output-1", 2, "input-1", -9.25));
+    coalescer.enqueue(removeSendOp("output-1", 2, "input-1"));
+    coalescer.flushNow();
+
+    CHECK_EQ(sent.size(), 1);
+    if (!sent.isEmpty()) {
+        CHECK(sent.front().kind == WriteOp::Kind::RemoveSend);
+    }
+}
+
+// ...but only for the SAME send. Removing one input's send must not cancel a
+// pending level change to a different input, or to the same input on another
+// channel.
+void testRemoveSendOnlyCancelsItsOwnPendingWrite() {
+    WriteCoalescer coalescer;
+    QVector<WriteOp> sent;
+    QObject::connect(&coalescer, &WriteCoalescer::writesReady,
+                     [&](const QVector<WriteOp>& ops) { sent.append(ops); });
+
+    coalescer.enqueue(sendOp("output-1", 2, "input-2", -3.0));
+    coalescer.enqueue(sendOp("output-1", 5, "input-1", -4.0));
+    coalescer.enqueue(removeSendOp("output-1", 2, "input-1"));
+    coalescer.flushNow();
+
+    CHECK_EQ(sent.size(), 3);
+    int sends = 0;
+    for (const WriteOp& op : sent) {
+        if (op.kind == WriteOp::Kind::Send) {
+            ++sends;
+        }
+    }
+    CHECK_EQ(sends, 2);
+}
+
 void testFlushNowSendsImmediately() {
     WriteCoalescer coalescer;
     int writes = 0;
@@ -584,6 +647,8 @@ int main(int argc, char** argv) {
     RUN(testDistinctKeysDoNotCollapse);
     RUN(testOrderedOpsArePreservedAndNotCollapsed);
     RUN(testStructuralOpsFlushBeforeCoalescedOnes);
+    RUN(testRemoveSendCancelsPendingLevelWrite);
+    RUN(testRemoveSendOnlyCancelsItsOwnPendingWrite);
     RUN(testFlushNowSendsImmediately);
     RUN(testNoWritesWhenIdle);
 
