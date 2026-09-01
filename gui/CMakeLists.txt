@@ -5,8 +5,13 @@ add_executable(pipeeq-gui
     main_window.cpp
     eq_curve_widget.cpp
     backend.cpp
+    backend_worker.cpp
     dbus_client.cpp
     fake_backend.cpp
+    model/app_state.cpp
+    model/edit_guard.cpp
+    model/level_meters.cpp
+    model/write_coalescer.cpp
     theme/theme.cpp
 )
 

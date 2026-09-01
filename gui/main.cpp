@@ -2,9 +2,8 @@
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 
-#include "dbus_client.h"
-#include "fake_backend.h"
 #include "main_window.h"
+#include "model/app_state.h"
 #include "theme/theme.h"
 
 int main(int argc, char** argv) {
@@ -28,14 +27,10 @@ int main(int argc, char** argv) {
     // read it at construction.
     pipeeq::theme::install(app);
 
-    pipeeq::Backend* backend = nullptr;
-    if (parser.isSet(demoOption)) {
-        backend = new pipeeq::FakeBackend(&app);
-    } else {
-        backend = new pipeeq::DbusClient(&app);
-    }
-
-    pipeeq::MainWindow window(backend);
+    // The store owns the backend and the thread it runs on; which backend it
+    // creates is the only thing --demo decides.
+    pipeeq::AppState state(parser.isSet(demoOption));
+    pipeeq::MainWindow window(&state);
 
     if (parser.isSet(geometryOption)) {
         // A fixed size makes screenshots comparable between runs, which is the
@@ -51,5 +46,8 @@ int main(int argc, char** argv) {
     }
 
     window.show();
+    // Metering is armed once there is something on screen to show it on. The
+    // daemon's lease expires by itself, so the store re-arms while this is set.
+    state.setMeteringEnabled(true);
     return app.exec();
 }

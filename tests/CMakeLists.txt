@@ -44,3 +44,20 @@ pipeeq_add_test(test_rt_no_alloc pipeeq_core)
 # Reshaping an output's channels to its device's real layout without losing
 # settings across a profile switch.
 pipeeq_add_test(test_adopt_layout pipeeq_core)
+
+# The GUI store's pure logic: write coalescing, edit guarding, meter ballistics.
+# Needs Qt (QObject/QTimer) and therefore AUTOMOC, so it is built only when the
+# GUI is.
+if(TARGET pipeeq-gui)
+    set(CMAKE_AUTOMOC ON)
+    add_executable(test_gui_model
+        test_gui_model.cpp
+        ${CMAKE_SOURCE_DIR}/gui/backend.cpp
+        ${CMAKE_SOURCE_DIR}/gui/model/edit_guard.cpp
+        ${CMAKE_SOURCE_DIR}/gui/model/level_meters.cpp
+        ${CMAKE_SOURCE_DIR}/gui/model/write_coalescer.cpp
+    )
+    target_include_directories(test_gui_model PRIVATE ${CMAKE_SOURCE_DIR}/gui)
+    target_link_libraries(test_gui_model PRIVATE pipeeq_test_support eqcore Qt6::Widgets)
+    add_test(NAME test_gui_model COMMAND test_gui_model)
+endif()

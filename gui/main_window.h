@@ -4,8 +4,8 @@
 
 #include <QMainWindow>
 
-#include "backend.h"
 #include "eq_curve_widget.h"
+#include "model/app_state.h"
 
 class QListWidget;
 class QListWidgetItem;
@@ -28,25 +28,32 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    // Takes the backend rather than creating one, so --demo can substitute a
-    // fake with no daemon behind it. Ownership stays with the caller.
-    explicit MainWindow(Backend* backend, QWidget* parent = nullptr);
+    // Reads from the store rather than calling a backend directly, so nothing
+    // it does can block on the daemon and every write goes through the
+    // coalescer. Ownership of the store stays with the caller.
+    explicit MainWindow(AppState* state, QWidget* parent = nullptr);
 
 private slots:
     void onAddOutputClicked();
     void onRemoveOutputClicked();
     void onStripSelectionChanged();
     void onGainSliderChanged(int value);
+    void onGainSliderPressed();
+    void onGainSliderReleased();
     void onMuteToggled(bool checked);
     void onAutoConnectToggled(bool checked);
     void onChannelPositionChanged(int index);
     void onBandCountChanged(int count);
     void onCurveBandEdited(int index, eqcore::EqBand band);
+    void onCurveBandEditBegan(int index);
+    void onCurveBandEditFinished(int index);
     void onCopyEqClicked();
     void onAddInputClicked();
     void onRemoveInputClicked();
-    void onDaemonOutputChanged(const QString& outputId);
-    void onDaemonInputsChanged();
+    void onTopologyChanged();
+    void onStripsUpdated();
+    void onChannelDetailUpdated(const QString& outputId, uint32_t channelIndex);
+    void onErrorReported(const QString& message);
     void refreshStrips();
     void refreshDevices();
     void refreshInputs();
@@ -77,7 +84,7 @@ private:
     // The device row for a strip's target, or null when it isn't present.
     const DeviceRow* findDevice(const QString& nodeName) const;
 
-    Backend* backend_;
+    AppState* state_;
 
     QListWidget* stripList_ = nullptr;
     QComboBox* deviceCombo_ = nullptr;
@@ -106,10 +113,10 @@ private:
 
     QLabel* statusLabel_ = nullptr;
 
-    std::vector<StripRow> strips_;
-    std::vector<DeviceRow> devices_;
-    std::vector<InputRow> inputs_;
     QString currentStripId_;
+    // Still needed for programmatic widget updates - a QSignalBlocker in all
+    // but name. It no longer has anything to do with reconciling daemon values;
+    // that is EditGuard's job in the store now.
     bool suppressSignals_ = false;
 };
 

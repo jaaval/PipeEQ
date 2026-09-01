@@ -133,3 +133,10 @@ signals:
 };
 
 } // namespace pipeeq
+
+// Needed because these cross a thread boundary as queued signal arguments: the
+// backend runs on its own thread and the store lives on the GUI thread.
+Q_DECLARE_METATYPE(pipeeq::DeviceRow)
+Q_DECLARE_METATYPE(pipeeq::StripRow)
+Q_DECLARE_METATYPE(pipeeq::InputRow)
+Q_DECLARE_METATYPE(pipeeq::MeterRow)

@@ -1,0 +1,373 @@
+#include "app_state.h"
+
+#include <algorithm>
+
+#include <nlohmann/json.hpp>
+
+#include "app_config.h"
+
+namespace pipeeq {
+
+namespace {
+
+QString filterTypeName(eqcore::FilterType type) {
+    return QString::fromStdString(nlohmann::json(type).get<std::string>());
+}
+
+} // namespace
+
+AppState::AppState(bool demo, QObject* parent) : QObject(parent) {
+    qRegisterMetaType<DaemonSnapshot>();
+    qRegisterMetaType<WriteOp>();
+    qRegisterMetaType<QVector<WriteOp>>();
+    qRegisterMetaType<QVector<MeterRow>>();
+    qRegisterMetaType<QVector<eqcore::EqBand>>("QVector<eqcore::EqBand>");
+    qRegisterMetaType<QVector<QPair<QString, double>>>("QVector<QPair<QString,double>>");
+
+    worker_ = new BackendWorker(demo);
+    worker_->moveToThread(&workerThread_);
+    connect(&workerThread_, &QThread::finished, worker_, &QObject::deleteLater);
+
+    connect(worker_, &BackendWorker::snapshotReady, this, &AppState::onSnapshotReady);
+    connect(worker_, &BackendWorker::writesCompleted, this, &AppState::onWritesCompleted);
+    connect(worker_, &BackendWorker::availabilityChanged, this, &AppState::availabilityChanged);
+    connect(worker_, &BackendWorker::channelDetailReady, this,
+            [this](const QString& outputId, uint32_t channelIndex,
+                    const QVector<eqcore::EqBand>& bands,
+                    const QVector<QPair<QString, double>>& sends) {
+                ChannelDetail& detail = details_[detailKey(outputId, channelIndex)];
+                detail.bands = bands;
+                detail.sends = sends;
+                emit channelDetailUpdated(outputId, channelIndex);
+            });
+
+    // Every daemon change notification becomes a resync request. Coarse, but
+    // the reads are off-thread and cheap, and it removes any chance of the
+    // cache and the daemon disagreeing about topology.
+    connect(worker_, &BackendWorker::daemonOutputChanged, this, [this](const QString&) { refresh(); });
+    connect(worker_, &BackendWorker::daemonOutputsChanged, this, &AppState::refresh);
+    connect(worker_, &BackendWorker::daemonInputsChanged, this, &AppState::refresh);
+    connect(worker_, &BackendWorker::daemonDevicesChanged, this, &AppState::refresh);
+    connect(worker_, &BackendWorker::metersReceived, this,
+            [this](const QVector<MeterRow>& outputs, const QVector<MeterRow>& inputs) {
+                meters_.ingest(outputs, inputs);
+            });
+
+    connect(&coalescer_, &WriteCoalescer::writesReady, worker_, &BackendWorker::applyWrites);
+
+    workerThread_.start();
+    QMetaObject::invokeMethod(worker_, &BackendWorker::initialize, Qt::QueuedConnection);
+    refresh();
+
+    resyncTimer_.setInterval(kResyncIntervalMs);
+    connect(&resyncTimer_, &QTimer::timeout, this, &AppState::refresh);
+    resyncTimer_.start();
+
+    // The daemon's metering lease expires on its own, so a watcher has to
+    // re-arm. That is deliberate: a GUI that crashes then stops metering with
+    // no cleanup on either side.
+    meterRearmTimer_.setInterval(kMeterRearmIntervalMs);
+    connect(&meterRearmTimer_, &QTimer::timeout, this, [this] {
+        if (meteringWanted_) {
+            QMetaObject::invokeMethod(worker_, "setMeteringEnabled", Qt::QueuedConnection,
+                                       Q_ARG(bool, true));
+        }
+    });
+}
+
+AppState::~AppState() {
+    workerThread_.quit();
+    workerThread_.wait();
+}
+
+QString AppState::detailKey(const QString& outputId, uint32_t channelIndex) const {
+    return outputId + "#" + QString::number(channelIndex);
+}
+
+const StripRow* AppState::findStrip(const QString& stripId) const {
+    auto it = std::find_if(snapshot_.strips.begin(), snapshot_.strips.end(),
+                            [&](const StripRow& s) { return s.id == stripId; });
+    return it == snapshot_.strips.end() ? nullptr : &*it;
+}
+
+const DeviceRow* AppState::findDevice(const QString& nodeName) const {
+    auto it = std::find_if(snapshot_.devices.begin(), snapshot_.devices.end(),
+                            [&](const DeviceRow& d) { return d.nodeName == nodeName; });
+    return it == snapshot_.devices.end() ? nullptr : &*it;
+}
+
+QVector<eqcore::EqBand> AppState::channelBands(const QString& outputId, uint32_t channelIndex) const {
+    const auto it = details_.constFind(detailKey(outputId, channelIndex));
+    return it == details_.constEnd() ? QVector<eqcore::EqBand>{} : it->bands;
+}
+
+QVector<QPair<QString, double>> AppState::channelSends(const QString& outputId,
+                                                        uint32_t channelIndex) const {
+    const auto it = details_.constFind(detailKey(outputId, channelIndex));
+    return it == details_.constEnd() ? QVector<QPair<QString, double>>{} : it->sends;
+}
+
+void AppState::requestChannelDetail(const QString& outputId, uint32_t channelIndex) {
+    QMetaObject::invokeMethod(worker_, "requestChannelDetail", Qt::QueuedConnection,
+                               Q_ARG(QString, outputId), Q_ARG(uint32_t, channelIndex));
+}
+
+void AppState::refresh() {
+    QMetaObject::invokeMethod(worker_, "requestSnapshot", Qt::QueuedConnection);
+}
+
+void AppState::onSnapshotReady(const DaemonSnapshot& snapshot) {
+    const auto stripIds = [](const QVector<StripRow>& strips) {
+        QStringList ids;
+        for (const StripRow& strip : strips) {
+            ids << strip.id;
+        }
+        return ids;
+    };
+    const auto deviceNames = [](const QVector<DeviceRow>& devices) {
+        QStringList names;
+        for (const DeviceRow& device : devices) {
+            names << device.nodeName;
+        }
+        return names;
+    };
+    const auto inputIds = [](const QVector<InputRow>& inputs) {
+        QStringList ids;
+        for (const InputRow& input : inputs) {
+            ids << input.id;
+        }
+        return ids;
+    };
+
+    const bool topologyMoved = stripIds(snapshot_.strips) != stripIds(snapshot.strips) ||
+                                deviceNames(snapshot_.devices) != deviceNames(snapshot.devices) ||
+                                inputIds(snapshot_.inputs) != inputIds(snapshot.inputs);
+
+    // Field-wise merge for anything currently being edited. A wholesale
+    // assignment here is what would make a snapshot arriving mid-drag snap the
+    // fader back to the daemon's older value.
+    DaemonSnapshot merged = snapshot;
+    for (StripRow& incoming : merged.strips) {
+        const StripRow* local = findStrip(incoming.id);
+        if (!local) {
+            continue;
+        }
+        if (guard_.isHeld(EditKey{incoming.id, Field::Gain, -1})) {
+            incoming.gainDb = local->gainDb;
+        }
+        if (guard_.isHeld(EditKey{incoming.id, Field::Mute, -1})) {
+            incoming.muted = local->muted;
+        }
+        if (guard_.isHeld(EditKey{incoming.id, Field::Position, -1})) {
+            incoming.position = local->position;
+        }
+        if (guard_.isHeld(EditKey{incoming.id, Field::AutoConnect, -1})) {
+            incoming.autoConnect = local->autoConnect;
+        }
+    }
+
+    snapshot_ = merged;
+    // Expiring a hold is what releases any value that was withheld while it was
+    // active: the next snapshot then carries the daemon's value through.
+    guard_.takeExpiredKeys();
+
+    if (topologyMoved) {
+        emit topologyChanged();
+    } else {
+        emit stripsUpdated();
+    }
+}
+
+// ------------------------------------------------------------------- writes --
+
+void AppState::beginEdit(const EditKey& key) {
+    guard_.beginEdit(key);
+}
+
+void AppState::endEdit(const EditKey& key) {
+    guard_.endEdit(key);
+    // Flush on release so the final value of a drag lands immediately rather
+    // than waiting out the coalescer's interval.
+    coalescer_.flushNow();
+}
+
+void AppState::enqueue(const WriteOp& op, const EditKey& key, bool flushNow) {
+    WriteOp stamped = op;
+    stamped.seq = nextSeq_++;
+    inFlight_[stamped.seq].push_back(key);
+    guard_.noteWriteSent(key);
+
+    coalescer_.enqueue(stamped);
+    if (flushNow) {
+        coalescer_.flushNow();
+    }
+}
+
+void AppState::onWritesCompleted(quint64 seq, bool ok, const QString& error) {
+    // Every batch with a sequence at or below this one has been applied.
+    for (auto it = inFlight_.begin(); it != inFlight_.end();) {
+        if (it.key() > seq) {
+            ++it;
+            continue;
+        }
+        for (const EditKey& key : *it) {
+            guard_.noteWriteCompleted(key);
+        }
+        it = inFlight_.erase(it);
+    }
+
+    if (!ok) {
+        // The optimistic local value is now wrong, so pull the truth rather
+        // than leaving a control showing something the daemon rejected.
+        emit errorReported(error);
+        refresh();
+    }
+}
+
+void AppState::setChannelGain(const QString& outputId, uint32_t channelIndex, double gainDb) {
+    const QString stripId = outputId + "#" + QString::number(channelIndex);
+    // Optimistic local update, so the UI tracks the pointer rather than the
+    // round trip. The guard is what keeps it from being overwritten.
+    for (StripRow& strip : snapshot_.strips) {
+        if (strip.outputId == outputId &&
+            (strip.channelIndex == channelIndex || !strip.groupId.isEmpty())) {
+            // Linked channels move together daemon-side; mirror that locally so
+            // a partner's fader doesn't lag a round trip behind.
+            const StripRow* self = findStrip(stripId);
+            if (self && !self->groupId.isEmpty() && strip.groupId == self->groupId) {
+                strip.gainDb = gainDb;
+            } else if (strip.channelIndex == channelIndex) {
+                strip.gainDb = gainDb;
+            }
+        }
+    }
+
+    WriteOp op;
+    op.kind = WriteOp::Kind::ChannelGain;
+    op.outputId = outputId;
+    op.channelIndex = channelIndex;
+    op.doubleArg = gainDb;
+    enqueue(op, EditKey{stripId, Field::Gain, -1}, /*flushNow=*/false);
+    emit stripsUpdated();
+}
+
+void AppState::setSend(const QString& outputId, uint32_t channelIndex, const QString& inputId,
+                        double gainDb) {
+    WriteOp op;
+    op.kind = WriteOp::Kind::Send;
+    op.outputId = outputId;
+    op.channelIndex = channelIndex;
+    op.stringArg = inputId;
+    op.doubleArg = gainDb;
+
+    const QString key = outputId + "#" + QString::number(channelIndex) + ":" + inputId;
+    enqueue(op, EditKey{key, Field::Send, -1}, /*flushNow=*/false);
+}
+
+void AppState::setChannelEqBand(const QString& outputId, uint32_t channelIndex, uint32_t bandIndex,
+                                 const eqcore::EqBand& band) {
+    ChannelDetail& detail = details_[detailKey(outputId, channelIndex)];
+    if (static_cast<int>(bandIndex) < detail.bands.size()) {
+        detail.bands[static_cast<int>(bandIndex)] = band;
+    }
+
+    WriteOp op;
+    op.kind = WriteOp::Kind::ChannelEqBand;
+    op.outputId = outputId;
+    op.channelIndex = channelIndex;
+    op.uintArg = bandIndex;
+    op.stringArg = filterTypeName(band.type);
+    op.doubleArg = band.freqHz;
+    op.doubleArg2 = band.gainDb;
+    op.doubleArg3 = band.q;
+
+    const QString stripId = outputId + "#" + QString::number(channelIndex);
+    enqueue(op, EditKey{stripId, Field::EqBand, static_cast<int>(bandIndex)}, /*flushNow=*/false);
+}
+
+void AppState::setChannelMuted(const QString& outputId, uint32_t channelIndex, bool muted) {
+    WriteOp op;
+    op.kind = WriteOp::Kind::ChannelMute;
+    op.outputId = outputId;
+    op.channelIndex = channelIndex;
+    op.boolArg = muted;
+    const QString stripId = outputId + "#" + QString::number(channelIndex);
+    enqueue(op, EditKey{stripId, Field::Mute, -1}, /*flushNow=*/true);
+}
+
+void AppState::setChannelPosition(const QString& outputId, uint32_t channelIndex,
+                                   const QString& position) {
+    WriteOp op;
+    op.kind = WriteOp::Kind::ChannelPosition;
+    op.outputId = outputId;
+    op.channelIndex = channelIndex;
+    op.stringArg = position;
+    const QString stripId = outputId + "#" + QString::number(channelIndex);
+    enqueue(op, EditKey{stripId, Field::Position, -1}, /*flushNow=*/true);
+}
+
+void AppState::setOutputAutoConnect(const QString& outputId, bool autoConnect) {
+    WriteOp op;
+    op.kind = WriteOp::Kind::OutputAutoConnect;
+    op.outputId = outputId;
+    op.boolArg = autoConnect;
+    enqueue(op, EditKey{outputId, Field::AutoConnect, -1}, /*flushNow=*/true);
+}
+
+void AppState::setChannelEqBandCount(const QString& outputId, uint32_t channelIndex,
+                                      uint32_t count) {
+    WriteOp op;
+    op.kind = WriteOp::Kind::ChannelEqBandCount;
+    op.outputId = outputId;
+    op.channelIndex = channelIndex;
+    op.uintArg = count;
+    const QString stripId = outputId + "#" + QString::number(channelIndex);
+    enqueue(op, EditKey{stripId, Field::EqBandCount, -1}, /*flushNow=*/true);
+    requestChannelDetail(outputId, channelIndex);
+}
+
+void AppState::removeSend(const QString& outputId, uint32_t channelIndex, const QString& inputId) {
+    WriteOp op;
+    op.kind = WriteOp::Kind::RemoveSend;
+    op.outputId = outputId;
+    op.channelIndex = channelIndex;
+    op.stringArg = inputId;
+    const QString key = outputId + "#" + QString::number(channelIndex) + ":" + inputId;
+    enqueue(op, EditKey{key, Field::Send, -1}, /*flushNow=*/true);
+}
+
+// ----------------------------------------------------------------- topology --
+
+void AppState::addOutput(const QString& deviceName, const QString& displayName) {
+    QMetaObject::invokeMethod(worker_, "addOutput", Qt::QueuedConnection,
+                               Q_ARG(QString, deviceName), Q_ARG(QString, displayName));
+}
+
+void AppState::removeOutput(const QString& outputId) {
+    QMetaObject::invokeMethod(worker_, "removeOutput", Qt::QueuedConnection,
+                               Q_ARG(QString, outputId));
+}
+
+void AppState::addInput(const QString& displayName) {
+    QMetaObject::invokeMethod(worker_, "addInput", Qt::QueuedConnection,
+                               Q_ARG(QString, displayName));
+}
+
+void AppState::removeInput(const QString& inputId) {
+    QMetaObject::invokeMethod(worker_, "removeInput", Qt::QueuedConnection,
+                               Q_ARG(QString, inputId));
+}
+
+void AppState::setMeteringEnabled(bool enabled) {
+    meteringWanted_ = enabled;
+    meters_.setActive(enabled);
+    QMetaObject::invokeMethod(worker_, "setMeteringEnabled", Qt::QueuedConnection,
+                               Q_ARG(bool, enabled));
+    if (enabled) {
+        meterRearmTimer_.start();
+    } else {
+        meterRearmTimer_.stop();
+    }
+}
+
+} // namespace pipeeq

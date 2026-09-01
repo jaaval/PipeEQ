@@ -48,10 +48,6 @@ add_subdirectory(common)
 add_subdirectory(daemon)
 add_subdirectory(packaging)
 
-if(PIPEEQ_BUILD_TESTS)
-    add_subdirectory(tests)
-endif()
-
 if(PIPEEQ_BUILD_GUI)
     find_package(Qt6 COMPONENTS Widgets)
     if(Qt6Widgets_FOUND)
@@ -59,4 +55,11 @@ if(PIPEEQ_BUILD_GUI)
     else()
         message(WARNING "Qt6 Widgets not found - skipping pipeeq-gui target")
     endif()
+endif()
+
+# Last, so it can test the GUI's model layer: that stanza is guarded on the
+# pipeeq-gui target existing, which it doesn't until the subdirectory above has
+# been processed.
+if(PIPEEQ_BUILD_TESTS)
+    add_subdirectory(tests)
 endif()

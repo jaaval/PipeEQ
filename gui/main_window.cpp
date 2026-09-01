@@ -59,7 +59,7 @@ QString wireNameFor(eqcore::FilterType type) {
 
 } // namespace
 
-MainWindow::MainWindow(Backend* backend, QWidget* parent) : QMainWindow(parent), backend_(backend) {
+MainWindow::MainWindow(AppState* state, QWidget* parent) : QMainWindow(parent), state_(state) {
     setWindowTitle("PipeEQ");
     resize(1000, 640);
 
@@ -115,6 +115,8 @@ MainWindow::MainWindow(Backend* backend, QWidget* parent) : QMainWindow(parent),
     gainSlider_ = new QSlider(Qt::Horizontal, central);
     gainSlider_->setRange(kMinGainDb, kMaxGainDb);
     connect(gainSlider_, &QSlider::valueChanged, this, &MainWindow::onGainSliderChanged);
+    connect(gainSlider_, &QSlider::sliderPressed, this, &MainWindow::onGainSliderPressed);
+    connect(gainSlider_, &QSlider::sliderReleased, this, &MainWindow::onGainSliderReleased);
     controlsRow->addWidget(gainSlider_, 1);
 
     gainLabel_ = new QLabel("0 dB", central);
@@ -183,38 +185,25 @@ MainWindow::MainWindow(Backend* backend, QWidget* parent) : QMainWindow(parent),
     statusLabel_ = new QLabel(this);
     statusBar()->addWidget(statusLabel_);
 
-    connect(backend_, &Backend::outputChanged, this, &MainWindow::onDaemonOutputChanged);
-    connect(backend_, &Backend::outputsChanged, this, &MainWindow::refreshStrips);
-    connect(backend_, &Backend::inputsChanged, this, &MainWindow::onDaemonInputsChanged);
-    connect(backend_, &Backend::devicesChanged, this, &MainWindow::refreshDevices);
+    connect(state_, &AppState::topologyChanged, this, &MainWindow::onTopologyChanged);
+    connect(state_, &AppState::stripsUpdated, this, &MainWindow::onStripsUpdated);
+    connect(state_, &AppState::channelDetailUpdated, this, &MainWindow::onChannelDetailUpdated);
+    connect(state_, &AppState::errorReported, this, &MainWindow::onErrorReported);
+    connect(state_, &AppState::availabilityChanged, this, [this](bool) { updateStripStatus(); });
 
-    refreshDevices();
-    refreshInputs();
-    refreshStrips();
-
-    // The daemon now emits DevicesChanged and OutputChanged, so this is only a
-    // backstop against a dropped signal rather than the primary refresh path -
-    // hence 5 s rather than the 3 s it used to poll at.
-    auto* pollTimer = new QTimer(this);
-    connect(pollTimer, &QTimer::timeout, this, [this] {
-        refreshDevices();
-        refreshStrips();
-    });
-    pollTimer->start(5000);
+    onTopologyChanged();
+    // The store owns the safety resync now, off the GUI thread, so there is no
+    // poll timer here at all.
 }
 
 // ------------------------------------------------------------------ lookups --
 
 const StripRow* MainWindow::findStrip(const QString& stripId) const {
-    auto it = std::find_if(strips_.begin(), strips_.end(),
-                            [&](const StripRow& s) { return s.id == stripId; });
-    return it == strips_.end() ? nullptr : &*it;
+    return state_->findStrip(stripId);
 }
 
 const DeviceRow* MainWindow::findDevice(const QString& nodeName) const {
-    auto it = std::find_if(devices_.begin(), devices_.end(),
-                            [&](const DeviceRow& d) { return d.nodeName == nodeName; });
-    return it == devices_.end() ? nullptr : &*it;
+    return state_->findDevice(nodeName);
 }
 
 bool MainWindow::channelUnavailable(const StripRow& strip) const {
@@ -224,13 +213,11 @@ bool MainWindow::channelUnavailable(const StripRow& strip) const {
 // ---------------------------------------------------------------- refreshing --
 
 void MainWindow::refreshDevices() {
-    devices_ = backend_->listDevices();
-
     const QString previous = deviceCombo_->currentData().toString();
     const bool wasSuppressed = suppressSignals_;
     suppressSignals_ = true;
     deviceCombo_->clear();
-    for (const DeviceRow& device : devices_) {
+    for (const DeviceRow& device : state_->devices()) {
         QString label = device.description.isEmpty() ? device.nodeName : device.description;
         if (!device.positions.isEmpty()) {
             label += QString(" (%1 ch)").arg(device.positions.size());
@@ -248,31 +235,14 @@ void MainWindow::refreshDevices() {
 }
 
 void MainWindow::refreshStrips() {
-    const std::vector<StripRow> updated = backend_->listStrips();
-
-    // Only rebuild the list widget when the SET of strips changed. Rebuilding
-    // it on every refresh would reset the selection and yank the detail pane
-    // out from under whatever the user was doing.
-    const auto idsOf = [](const std::vector<StripRow>& rows) {
-        QStringList ids;
-        for (const StripRow& row : rows) {
-            ids << row.id;
-        }
-        return ids;
-    };
-    const bool setChanged = idsOf(strips_) != idsOf(updated);
-    strips_ = updated;
-
-    if (!setChanged) {
-        updateStripStatus();
-        return;
-    }
-
+    // Rebuilds the list widget from the store's cache. Only called when the
+    // store says the strip SET moved - rebuilding on every value update would
+    // reset the selection and yank the detail pane out from under the user.
     const QString previousSelection = currentStripId_;
     const bool wasSuppressed = suppressSignals_;
     suppressSignals_ = true;
     stripList_->clear();
-    for (const StripRow& strip : strips_) {
+    for (const StripRow& strip : state_->strips()) {
         auto* item = new QListWidgetItem(stripList_);
         item->setData(Qt::UserRole, strip.id);
         applyStripItem(item, strip);
@@ -284,8 +254,8 @@ void MainWindow::refreshStrips() {
     // first one so the detail pane is never left showing nothing.
     if (findStrip(previousSelection)) {
         selectStrip(previousSelection);
-    } else if (!strips_.empty()) {
-        selectStrip(strips_.front().id);
+    } else if (!state_->strips().isEmpty()) {
+        selectStrip(state_->strips().front().id);
     } else {
         currentStripId_.clear();
         updateStripStatus();
@@ -293,7 +263,6 @@ void MainWindow::refreshStrips() {
 }
 
 void MainWindow::refreshInputs() {
-    inputs_ = backend_->listInputs();
     rebuildMixerTable();
 }
 
@@ -352,10 +321,10 @@ void MainWindow::updateStripStatus() {
         // "No daemon" and "no outputs yet" used to be indistinguishable here,
         // which made a daemon that wasn't running look like a working one with
         // nothing configured.
-        if (!backend_->isAvailable()) {
+        if (!state_->isAvailable()) {
             statusLabel_->setText("Not connected to pipeeq-daemon. Is the service running?");
         } else {
-            statusLabel_->setText(strips_.empty()
+            statusLabel_->setText(state_->strips().isEmpty()
                                        ? "No outputs configured. Pick a device and press Add."
                                        : "No channel selected.");
         }
@@ -416,8 +385,11 @@ void MainWindow::onStripSelectionChanged() {
 void MainWindow::loadStripDetail(const StripRow& strip) {
     rebuildPositionCombo(strip);
 
-    const std::vector<eqcore::EqBand> bands =
-        backend_->getChannelEqBands(strip.outputId, strip.channelIndex);
+    // Draw whatever the store already has, and ask for a refresh. The request
+    // is async, so selecting a channel is instant even if the daemon is slow;
+    // onChannelDetailUpdated redraws when the answer arrives.
+    const QVector<eqcore::EqBand> cached = state_->channelBands(strip.outputId, strip.channelIndex);
+    const std::vector<eqcore::EqBand> bands(cached.begin(), cached.end());
 
     const bool wasSuppressed = suppressSignals_;
     suppressSignals_ = true;
@@ -428,6 +400,8 @@ void MainWindow::loadStripDetail(const StripRow& strip) {
     curveWidget_->setBands(bands);
     rebuildMixerTable();
     updateStripStatus();
+
+    state_->requestChannelDetail(strip.outputId, strip.channelIndex);
 }
 
 void MainWindow::rebuildPositionCombo(const StripRow& strip) {
@@ -467,12 +441,10 @@ void MainWindow::onAddOutputClicked() {
         QMessageBox::information(this, "PipeEQ", "No output device is available to add.");
         return;
     }
-    const QString label = deviceCombo_->currentText();
-    const QString outputId = backend_->addOutput(deviceName, label);
-    refreshStrips();
-    if (!outputId.isEmpty()) {
-        selectStrip(outputId + "#0");
-    }
+    // Fire and forget: the new output's id comes back as part of the next
+    // snapshot rather than as a return value, and the store's topologyChanged
+    // rebuilds the list. Selection falls back to whatever survives.
+    state_->addOutput(deviceName, deviceCombo_->currentText());
 }
 
 void MainWindow::onRemoveOutputClicked() {
@@ -488,8 +460,7 @@ void MainWindow::onRemoveOutputClicked() {
     if (answer != QMessageBox::Yes) {
         return;
     }
-    backend_->removeOutput(strip->outputId);
-    refreshStrips();
+    state_->removeOutput(strip->outputId);
 }
 
 void MainWindow::onGainSliderChanged(int value) {
@@ -501,7 +472,19 @@ void MainWindow::onGainSliderChanged(int value) {
         return;
     }
     gainLabel_->setText(QString("%1 dB").arg(value));
-    backend_->setChannelGain(strip->outputId, strip->channelIndex, value);
+    state_->setChannelGain(strip->outputId, strip->channelIndex, value);
+}
+
+void MainWindow::onGainSliderPressed() {
+    if (const StripRow* strip = findStrip(currentStripId_)) {
+        state_->beginEdit(EditKey{strip->id, Field::Gain, -1});
+    }
+}
+
+void MainWindow::onGainSliderReleased() {
+    if (const StripRow* strip = findStrip(currentStripId_)) {
+        state_->endEdit(EditKey{strip->id, Field::Gain, -1});
+    }
 }
 
 void MainWindow::onMuteToggled(bool checked) {
@@ -509,7 +492,7 @@ void MainWindow::onMuteToggled(bool checked) {
         return;
     }
     if (const StripRow* strip = findStrip(currentStripId_)) {
-        backend_->setChannelMuted(strip->outputId, strip->channelIndex, checked);
+        state_->setChannelMuted(strip->outputId, strip->channelIndex, checked);
     }
 }
 
@@ -518,7 +501,7 @@ void MainWindow::onAutoConnectToggled(bool checked) {
         return;
     }
     if (const StripRow* strip = findStrip(currentStripId_)) {
-        backend_->setOutputAutoConnect(strip->outputId, checked);
+        state_->setOutputAutoConnect(strip->outputId, checked);
     }
 }
 
@@ -534,8 +517,7 @@ void MainWindow::onChannelPositionChanged(int index) {
     if (position == strip->position) {
         return;
     }
-    backend_->setChannelPosition(strip->outputId, strip->channelIndex, position);
-    refreshStrips();
+    state_->setChannelPosition(strip->outputId, strip->channelIndex, position);
 }
 
 // ------------------------------------------------------------------- EQ tab --
@@ -548,12 +530,10 @@ void MainWindow::onBandCountChanged(int count) {
     if (!strip) {
         return;
     }
-    backend_->setChannelEqBandCount(strip->outputId, strip->channelIndex,
+    // The store re-requests the detail as part of this, so the table and curve
+    // are redrawn by onChannelDetailUpdated rather than from a blocking read.
+    state_->setChannelEqBandCount(strip->outputId, strip->channelIndex,
                                   static_cast<uint32_t>(count));
-    const std::vector<eqcore::EqBand> bands =
-        backend_->getChannelEqBands(strip->outputId, strip->channelIndex);
-    rebuildBandTable(bands);
-    curveWidget_->setBands(bands);
 }
 
 void MainWindow::rebuildBandTable(const std::vector<eqcore::EqBand>& bands) {
@@ -619,15 +599,13 @@ void MainWindow::pushBandRow(int row) {
         return;
     }
 
-    const auto type = static_cast<eqcore::FilterType>(typeCombo->currentIndex());
-    backend_->setChannelEqBand(strip->outputId, strip->channelIndex, static_cast<uint32_t>(row),
-                             wireNameFor(type), freqSpin->value(), gainSpin->value(), qSpin->value());
-
     eqcore::EqBand band;
-    band.type = type;
+    band.type = static_cast<eqcore::FilterType>(typeCombo->currentIndex());
     band.freqHz = freqSpin->value();
     band.gainDb = gainSpin->value();
     band.q = qSpin->value();
+
+    state_->setChannelEqBand(strip->outputId, strip->channelIndex, static_cast<uint32_t>(row), band);
 
     std::vector<eqcore::EqBand> bands = curveWidget_->bands();
     if (row < static_cast<int>(bands.size())) {
@@ -657,8 +635,22 @@ void MainWindow::onCurveBandEdited(int index, eqcore::EqBand band) {
     }
     suppressSignals_ = wasSuppressed;
 
-    backend_->setChannelEqBand(strip->outputId, strip->channelIndex, static_cast<uint32_t>(index),
-                             wireNameFor(band.type), band.freqHz, band.gainDb, band.q);
+    // One write per drag EVENT is fine now: the store coalesces them to at most
+    // 25 a second and flushes the final value on release. Previously this was a
+    // blocking round trip per mouse-move.
+    state_->setChannelEqBand(strip->outputId, strip->channelIndex, static_cast<uint32_t>(index), band);
+}
+
+void MainWindow::onCurveBandEditBegan(int index) {
+    if (const StripRow* strip = findStrip(currentStripId_)) {
+        state_->beginEdit(EditKey{strip->id, Field::EqBand, index});
+    }
+}
+
+void MainWindow::onCurveBandEditFinished(int index) {
+    if (const StripRow* strip = findStrip(currentStripId_)) {
+        state_->endEdit(EditKey{strip->id, Field::EqBand, index});
+    }
 }
 
 void MainWindow::onCopyEqClicked() {
@@ -666,8 +658,9 @@ void MainWindow::onCopyEqClicked() {
     if (!source) {
         return;
     }
-    const std::vector<eqcore::EqBand> bands =
-        backend_->getChannelEqBands(source->outputId, source->channelIndex);
+    const QVector<eqcore::EqBand> cached =
+        state_->channelBands(source->outputId, source->channelIndex);
+    const std::vector<eqcore::EqBand> bands(cached.begin(), cached.end());
 
     QDialog dialog(this);
     dialog.setWindowTitle("Copy EQ to...");
@@ -677,7 +670,7 @@ void MainWindow::onCopyEqClicked() {
         &dialog));
 
     std::vector<std::pair<QCheckBox*, const StripRow*>> targets;
-    for (const StripRow& strip : strips_) {
+    for (const StripRow& strip : state_->strips()) {
         if (strip.id == source->id) {
             continue;
         }
@@ -708,15 +701,13 @@ void MainWindow::onCopyEqClicked() {
         // instance: sharing is what the assignment matrix in the new UI is for,
         // and doing it implicitly here would surprise anyone who then edited
         // one side.
-        backend_->setChannelEqBandCount(target->outputId, target->channelIndex,
+        state_->setChannelEqBandCount(target->outputId, target->channelIndex,
                                       static_cast<uint32_t>(bands.size()));
         for (std::size_t i = 0; i < bands.size(); ++i) {
-            backend_->setChannelEqBand(target->outputId, target->channelIndex,
-                                     static_cast<uint32_t>(i), wireNameFor(bands[i].type),
-                                     bands[i].freqHz, bands[i].gainDb, bands[i].q);
+            state_->setChannelEqBand(target->outputId, target->channelIndex,
+                                      static_cast<uint32_t>(i), bands[i]);
         }
     }
-    refreshStrips();
 }
 
 // ---------------------------------------------------------------- Mixer tab --
@@ -727,15 +718,15 @@ void MainWindow::rebuildMixerTable() {
     const bool wasSuppressed = suppressSignals_;
     suppressSignals_ = true;
 
-    mixerTable_->setRowCount(static_cast<int>(inputs_.size()));
+    mixerTable_->setRowCount(state_->inputs().size());
 
-    std::vector<std::pair<QString, double>> sends;
+    QVector<QPair<QString, double>> sends;
     if (strip) {
-        sends = backend_->getChannelSends(strip->outputId, strip->channelIndex);
+        sends = state_->channelSends(strip->outputId, strip->channelIndex);
     }
 
-    for (int row = 0; row < static_cast<int>(inputs_.size()); ++row) {
-        const InputRow& input = inputs_[static_cast<std::size_t>(row)];
+    for (int row = 0; row < state_->inputs().size(); ++row) {
+        const InputRow& input = state_->inputs().at(row);
 
         QString label = input.displayName;
         if (!input.positions.isEmpty()) {
@@ -789,23 +780,14 @@ void MainWindow::pushMixerRow(int row) {
     levelSlider->setEnabled(onCheck->isChecked());
 
     if (!onCheck->isChecked()) {
-        backend_->removeSend(strip->outputId, strip->channelIndex, inputId);
+        state_->removeSend(strip->outputId, strip->channelIndex, inputId);
         return;
     }
 
-    if (!backend_->setSend(strip->outputId, strip->channelIndex, inputId, levelSlider->value())) {
-        // The daemon refused - almost always because this output already sends
-        // from the maximum number of inputs. Saying so beats leaving a switch
-        // that looks on but does nothing.
-        const bool wasSuppressed = suppressSignals_;
-        suppressSignals_ = true;
-        onCheck->setChecked(false);
-        levelSlider->setEnabled(false);
-        suppressSignals_ = wasSuppressed;
-        statusLabel_->setText(
-            QString("Could not route \"%1\" here - this output is already at its send limit.")
-                .arg(nameItem->text()));
-    }
+    // A refusal (almost always the per-output send limit) now comes back
+    // asynchronously as errorReported, which resyncs - so the switch corrects
+    // itself rather than being left on while doing nothing.
+    state_->setSend(strip->outputId, strip->channelIndex, inputId, levelSlider->value());
 }
 
 void MainWindow::onAddInputClicked() {
@@ -816,8 +798,7 @@ void MainWindow::onAddInputClicked() {
     if (!accepted || name.trimmed().isEmpty()) {
         return;
     }
-    backend_->addInput(name.trimmed());
-    refreshInputs();
+    state_->addInput(name.trimmed());
 }
 
 void MainWindow::onRemoveInputClicked() {
@@ -836,21 +817,44 @@ void MainWindow::onRemoveInputClicked() {
     if (answer != QMessageBox::Yes) {
         return;
     }
-    backend_->removeInput(nameItem->data(Qt::UserRole).toString());
-    refreshInputs();
+    state_->removeInput(nameItem->data(Qt::UserRole).toString());
 }
 
 // -------------------------------------------------------------- daemon events --
 
-void MainWindow::onDaemonOutputChanged(const QString& outputId) {
-    // A set on a linked channel moves its partners too, so refresh the whole
-    // output's strips rather than just the one that was touched.
-    Q_UNUSED(outputId);
+void MainWindow::onTopologyChanged() {
+    refreshDevices();
     refreshStrips();
+    refreshInputs();
 }
 
-void MainWindow::onDaemonInputsChanged() {
-    refreshInputs();
+void MainWindow::onStripsUpdated() {
+    // Values moved but the set didn't: update labels and the controls in place
+    // and leave the band and mixer tables alone, so nothing is destroyed under
+    // a slider someone is dragging.
+    updateStripStatus();
+}
+
+void MainWindow::onChannelDetailUpdated(const QString& outputId, uint32_t channelIndex) {
+    const StripRow* strip = findStrip(currentStripId_);
+    if (!strip || strip->outputId != outputId || strip->channelIndex != channelIndex) {
+        return; // detail for a channel that isn't on screen
+    }
+    const QVector<eqcore::EqBand> cached = state_->channelBands(outputId, channelIndex);
+    const std::vector<eqcore::EqBand> bands(cached.begin(), cached.end());
+
+    const bool wasSuppressed = suppressSignals_;
+    suppressSignals_ = true;
+    bandCountSpin_->setValue(static_cast<int>(bands.size()));
+    suppressSignals_ = wasSuppressed;
+
+    rebuildBandTable(bands);
+    curveWidget_->setBands(bands);
+    rebuildMixerTable();
+}
+
+void MainWindow::onErrorReported(const QString& message) {
+    statusLabel_->setText(message);
 }
 
 } // namespace pipeeq
