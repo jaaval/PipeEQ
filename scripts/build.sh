@@ -9,5 +9,5 @@ cmake -S . -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInf
 cmake --build "$BUILD_DIR" -j"$(nproc)"
 
 echo
-echo "Build complete. Running eqcore self-tests:"
-"$BUILD_DIR/common/eqcore_selftest"
+echo "Build complete. Running test suites:"
+ctest --test-dir "$BUILD_DIR" --output-on-failure

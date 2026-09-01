@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 #include <QMouseEvent>
 #include <QPainter>
@@ -9,19 +10,6 @@
 #include <QWheelEvent>
 
 namespace pipeeq {
-
-namespace {
-
-eqcore::EqChain buildChain(const std::vector<eqcore::EqBand>& bands, double sampleRateHz) {
-    eqcore::EqChain chain(1, sampleRateHz);
-    chain.setBandCount(bands.size());
-    for (std::size_t i = 0; i < bands.size(); ++i) {
-        chain.setBand(i, bands[i]);
-    }
-    return chain;
-}
-
-} // namespace
 
 EqCurveWidget::EqCurveWidget(QWidget* parent) : QWidget(parent) {
     setMinimumHeight(160);
@@ -102,14 +90,20 @@ void EqCurveWidget::paintEvent(QPaintEvent* /*event*/) {
     painter.drawLine(QPointF(r.left(), gainToY(0.0)), QPointF(r.right(), gainToY(0.0)));
 
     if (!bands_.empty()) {
-        const eqcore::EqChain chain = buildChain(bands_, kSampleRateHz);
+        // One evaluation per pixel column, batched so each band's coefficients
+        // are computed once for the whole curve rather than once per point.
+        const int steps = std::max(1, static_cast<int>(r.width()));
+        std::vector<double> freqs(static_cast<std::size_t>(steps) + 1);
+        for (int i = 0; i <= steps; ++i) {
+            freqs[static_cast<std::size_t>(i)] = xToFreq(r.left() + i);
+        }
+        std::vector<double> responseDb(freqs.size(), 0.0);
+        eqcore::eqResponseCurveDb(bands_, freqs, kSampleRateHz, responseDb);
 
         QPainterPath path;
-        const int steps = static_cast<int>(r.width());
         for (int i = 0; i <= steps; ++i) {
             const double x = r.left() + i;
-            const double db = chain.frequencyResponseDb(xToFreq(x));
-            const double y = gainToY(db);
+            const double y = gainToY(responseDb[static_cast<std::size_t>(i)]);
             if (i == 0) {
                 path.moveTo(x, y);
             } else {

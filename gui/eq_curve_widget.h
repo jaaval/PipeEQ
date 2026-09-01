@@ -5,14 +5,14 @@
 #include <QWidget>
 
 #include "eq_band.h"
-#include "eq_chain.h"
+#include "eq_response.h"
 
 namespace pipeeq {
 
 // Draws the combined frequency response of a set of EqBands on a log-frequency
 // x-axis, with draggable control points (drag = freq/gain, wheel = Q). Uses
-// eqcore::EqChain::frequencyResponseDb directly so the curve always matches
-// what the daemon's OutputRoute actually computes for the same bands.
+// eqcore::eqResponseCurveDb directly - the same math the daemon applies - so
+// the curve always matches what is actually being computed for those bands.
 class EqCurveWidget : public QWidget {
     Q_OBJECT
 
