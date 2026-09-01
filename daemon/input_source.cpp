@@ -6,6 +6,7 @@
 #include <spa/pod/builder.h>
 
 #include "audio_format.h"
+#include "channel_layout.h"
 
 namespace pipeeq {
 
@@ -19,11 +20,14 @@ const pw_stream_events kInputSourceStreamEvents = {
 
 } // namespace
 
-InputSource::InputSource(pw_core* core, std::string id, std::string displayName, int numChannels,
-                          uint32_t sampleRateHz)
+InputSource::InputSource(pw_core* core, std::string id, std::string displayName,
+                          std::vector<std::string> positions, uint32_t sampleRateHz)
     : id_(std::move(id)),
       displayName_(std::move(displayName)),
-      ringBuffer_(std::make_shared<InterleavedRingBuffer>(sampleRateHz / 2, numChannels)) {
+      numChannels_(static_cast<int>(positions.size())),
+      positions_(std::move(positions)),
+      ringBuffer_(std::make_shared<RingBuffer>(sampleRateHz / 2, static_cast<int>(positions_.size()))) {
+    const int numChannels = numChannels_;
     const std::string nodeName = "pipeeq_input_" + id_;
 
     pw_properties* props =
@@ -43,7 +47,7 @@ InputSource::InputSource(pw_core* core, std::string id, std::string displayName,
     info.rate = sampleRateHz;
     // Makes this advertise a real stereo pair, so applications and volume
     // controls see front-left/front-right instead of aux0/aux1.
-    fillChannelPositions(info, numChannels);
+    applyChannelPositions(info, positions_);
 
     const spa_pod* params[1];
     params[0] = spa_format_audio_raw_build(&podBuilder, SPA_PARAM_EnumFormat, &info);

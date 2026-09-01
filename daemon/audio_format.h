@@ -1,29 +1,42 @@
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
+#include <string>
+#include <vector>
+
 #include <spa/param/audio/raw.h>
+
+#include "channel_layout.h"
 
 namespace pipeeq {
 
-// Fills in the channel positions of an audio format.
+// Fills in the channel positions of an audio format from a list of SPA channel
+// short names.
 //
-// Without this, a 2-channel stream is negotiated with no positions at all,
-// which PipeWire reports as the channel map "aux0,aux1" and names the ports
-// playback_0/playback_1: two undefined auxiliary channels rather than a
-// stereo pair. Applications and volume UIs then can't tell which channel is
-// left, so they show "aux0/aux1" sliders, lose balance control, and may
-// remix rather than pass stereo through untouched.
+// Without positions, a stream is negotiated with the channel map "aux0,aux1..."
+// and ports named playback_0/playback_1: undefined auxiliary channels rather
+// than a known layout. Applications and volume UIs then can't tell which
+// channel is which, so they show aux sliders, lose balance control, and may
+// remix rather than pass the signal through untouched.
 //
-// PipeEQ is deliberately stereo-only (mixing and EQ both assume a channel
-// pair), so this only knows about mono and stereo. Anything else is left
-// position-less on purpose, which is the honest thing to advertise for a
-// layout the rest of the daemon doesn't actually understand.
-inline void fillChannelPositions(spa_audio_info_raw& info, int numChannels) {
-    if (numChannels == 1) {
-        info.position[0] = SPA_AUDIO_CHANNEL_MONO;
-    } else if (numChannels == 2) {
-        info.position[0] = SPA_AUDIO_CHANNEL_FL;
-        info.position[1] = SPA_AUDIO_CHANNEL_FR;
+// Any name SPA doesn't recognize becomes SPA_AUDIO_CHANNEL_UNKNOWN, which is
+// the honest thing to advertise for a channel we can't identify - better than
+// guessing a position the hardware may not have.
+inline void applyChannelPositions(spa_audio_info_raw& info,
+                                   const std::vector<std::string>& positions) {
+    const std::size_t count =
+        std::min<std::size_t>(positions.size(), SPA_AUDIO_MAX_CHANNELS);
+    for (std::size_t i = 0; i < count; ++i) {
+        info.position[i] = layout::positionValue(positions[i]);
     }
+}
+
+// Convenience for a stream whose layout is just "the conventional one for this
+// channel count" - a virtual sink being created, or a device that advertises no
+// layout of its own.
+inline void applyDefaultChannelPositions(spa_audio_info_raw& info, int numChannels) {
+    applyChannelPositions(info, layout::defaultPositionsFor(numChannels));
 }
 
 } // namespace pipeeq
