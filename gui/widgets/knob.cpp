@@ -25,9 +25,11 @@ constexpr int kDiameter = 46;
 constexpr double kStartAngleDeg = 225.0; // Qt angles: counter-clockwise from 3 o'clock
 constexpr double kSweepDeg = 270.0;
 
-// Pixels of vertical drag for the full sweep. Roughly a hand's travel; short
-// enough to cross the range in one gesture, long enough that 0.1 dB is
-// reachable without the fine modifier.
+// Pixels of vertical drag for the full sweep. Roughly a hand's travel, and
+// short enough to cross the range in one gesture. That puts gain at 0.2 dB per
+// pixel, so 0.1 dB needs the Shift modifier (0.04 dB/px) or the field below -
+// an earlier note here claimed 0.1 dB was reachable without it, which was off
+// by a factor of two.
 constexpr double kDragPixelsForFullRange = 240.0;
 
 // One wheel notch, as a fraction of the sweep. 1/64 puts gain at 0.75 dB and
@@ -119,9 +121,9 @@ void Knob::mouseMoveEvent(QMouseEvent* event) {
     if (!dragging_) {
         return;
     }
-    // Measured from where the drag STARTED, not from the last move: accumulating
-    // per-move deltas drifts, because each one is rounded to the value's
-    // precision and the error compounds over a long drag.
+    // Measured from where the drag STARTED, not from the value it has now.
+    // Applying each move to the current value compounds them: the pointer
+    // travels the range once and the value travels it many times over.
     const double travelled = dragOriginY_ - event->position().toPoint().y();
     const double scale = (event->modifiers() & Qt::ShiftModifier) ? 0.2 : 1.0;
     applyNormalized(dragOriginNorm_ + scale * travelled / kDragPixelsForFullRange);
@@ -139,15 +141,29 @@ void Knob::mouseDoubleClickEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton || !haveDefault_) {
         return;
     }
-    // The press that preceded this already opened an edit.
+    // Qt's sequence is press, release, double-click, release - so the release
+    // in the middle has ALREADY closed the edit the first press opened, and
+    // this has to open its own. An earlier comment here claimed the preceding
+    // press covered it; it does not, and the reset was written with no hold
+    // open. Setting dragging_ also makes double-click-then-drag work, which
+    // previously did nothing until the button was released and pressed again.
+    dragging_ = true;
+    dragOriginY_ = event->position().toPoint().y();
     value_ = std::clamp(defaultValue_, minimum_, maximum_);
+    dragOriginNorm_ = normalized();
     update();
+    emit editBegan();
     emit valueChanging(value_);
 }
 
 void Knob::wheelEvent(QWheelEvent* event) {
     const double notches = event->angleDelta().y() / 120.0;
     if (notches == 0.0) {
+        // A purely horizontal wheel. Ignored rather than swallowed, so it can
+        // reach whatever might scroll above - the other two wheel handlers in
+        // this codebase both state accept or ignore explicitly, and this was
+        // the one that quietly consumed an event it had not used.
+        event->ignore();
         return;
     }
     const double scale = (event->modifiers() & Qt::ShiftModifier) ? 0.2 : 1.0;
@@ -267,6 +283,10 @@ KnobField::KnobField(const QString& label, QWidget* parent) : QWidget(parent) {
     layout->addWidget(caption);
 
     knob_ = new Knob(this);
+    knob_->setAccessibleName(label);
+    knob_->setAccessibleDescription(
+        QStringLiteral("Rotary control. Drag up or down, roll the wheel, or use the arrow keys; "
+                        "the field below takes a typed value."));
     layout->addWidget(knob_, 0, Qt::AlignHCenter);
 
     field_ = new QDoubleSpinBox(this);

@@ -218,6 +218,12 @@ EqEditor::EqEditor(AppState* state, QWidget* parent) : QWidget(parent), state_(s
     // occupies the same arc wherever it sits.
     freqKnob_->setTaper(Knob::Taper::Logarithmic);
     freqKnob_->setDefaultValue(1000.0);
+    // The FIELD's step, which is a separate thing from the knob's taper and was
+    // left at QDoubleSpinBox's default of 1.0 - so the wheel and arrow keys over
+    // the number still moved 1 Hz at a time, twenty thousand steps across the
+    // range, which is the whole problem the knob was added to solve. It is the
+    // only control in this row a keyboard user tabbing through will land on.
+    freqKnob_->setSingleStep(10.0);
     connectKnob(freqKnob_, &eqcore::EqBand::freqHz);
     bandRow->addWidget(freqKnob_);
 
@@ -228,6 +234,7 @@ EqEditor::EqEditor(AppState* state, QWidget* parent) : QWidget(parent), state_(s
     // Linear, and centred: the arc fills from 0 dB, so a cut and a boost are
     // visibly opposite rather than both being "more arc".
     gainKnob_->setDefaultValue(0.0);
+    gainKnob_->setSingleStep(0.5);
     connectKnob(gainKnob_, &eqcore::EqBand::gainDb);
     bandRow->addWidget(gainKnob_);
 

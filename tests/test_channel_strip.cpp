@@ -25,7 +25,16 @@ using pipeeq::StripRow;
 
 namespace {
 
-// A strip laid out at a realistic size, so its rectangles are real.
+// A strip laid out at a realistic size.
+//
+// The resize comes FIRST, and that ordering is load-bearing: a widget that has
+// never been shown receives no resize event, so the layout is only ever
+// computed by setStrips - and if the resize follows it, everything is laid out
+// at QWidget's default 640x480 while the widget is 66 px wide. That is not
+// hypothetical, it is what this fixture did: the meter rectangle came out ten
+// times wider than the strip, so every press aimed at a point outside it.
+// testTheFaderAndTheMeterDoNotOverlap now asserts the layout fits the widget,
+// which is what catches it.
 struct Fixture {
     LevelMeters meters;
     ChannelStrip strip{&meters};
@@ -42,8 +51,8 @@ struct Fixture {
         row.connected = true;
         row.driven = true;
         row.gainDb = 0.0;
-        strip.setStrips({row});
         strip.resize(strip.sizeHint().width(), 300);
+        strip.setStrips({row});
     }
 };
 
@@ -103,6 +112,74 @@ void testTheFaderAndTheMeterDoNotOverlap() {
     CHECK(!f.strip.faderRect().intersects(f.strip.meterAreaRect()));
     CHECK(f.strip.faderRect().contains(inFader(f.strip)));
     CHECK(f.strip.meterAreaRect().contains(inMeter(f.strip)));
+
+    // And the layout must fit the widget it belongs to. Without this the rects
+    // can be computed for a completely different size and still satisfy
+    // everything above - which is exactly what happened, at 640x480 in a 66 px
+    // strip.
+    CHECK(f.strip.faderRect().left() >= 0);
+    CHECK(f.strip.faderRect().top() >= 0);
+    CHECK(f.strip.meterAreaRect().right() < f.strip.width());
+    CHECK(f.strip.meterAreaRect().bottom() < f.strip.height());
+}
+
+// ------------------------------------------------------ which way is louder --
+
+// Up is louder. Unasserted until now: the only value check in this suite was
+// "below unity", and unity sits at 80% of the travel, so an inverted fader -
+// press low, get loud - produced -2.9 dB where it should produce -30 dB and
+// passed. A strip that ran backwards would have shipped.
+void testDraggingUpRaisesTheGain() {
+    Fixture f;
+    f.strip.setSelected(true);
+    Count changing;
+    changing.hook(&f.strip, &ChannelStrip::gainChanging);
+
+    const QRect fader = f.strip.faderRect();
+    press(f.strip, QPoint(fader.center().x(), fader.bottom() - 1));
+    release(f.strip, QPoint(fader.center().x(), fader.bottom() - 1));
+    const double atBottom = changing.values.value(0);
+
+    press(f.strip, QPoint(fader.center().x(), fader.top() + 1));
+    release(f.strip, QPoint(fader.center().x(), fader.top() + 1));
+    const double atTop = changing.values.value(1);
+
+    CHECK(atTop > atBottom);
+    CHECK(atTop > pipeeq::taper::kMaxDb - 1.5);
+    CHECK(pipeeq::taper::isSilent(atBottom) || atBottom <= pipeeq::taper::kMinDb + 1.5);
+
+    // And the ends EXACTLY, which is stronger than the mapping check below
+    // because it does not restate the formula: the first pixel of the track is
+    // maximum and the last is silence. It was not so - the divisor was the
+    // track's height rather than its travel, so the topmost pixel came out
+    // ~0.25 dB short and maximum was only reachable by dragging off the edge.
+    press(f.strip, QPoint(fader.center().x(), fader.top()));
+    release(f.strip, QPoint(fader.center().x(), fader.top()));
+    CHECK_NEAR(changing.values.value(2), pipeeq::taper::kMaxDb, 1e-9);
+
+    press(f.strip, QPoint(fader.center().x(), fader.bottom()));
+    release(f.strip, QPoint(fader.center().x(), fader.bottom()));
+    CHECK(pipeeq::taper::isSilent(changing.values.value(3)));
+}
+
+// The whole mapping, not only its direction: a press lands on the value the
+// shared taper puts at that fraction of the travel. This is what pins the
+// pixel-to-dB arithmetic, including which edge it measures from.
+void testPressMapsThroughTheSharedTaper() {
+    Fixture f;
+    f.strip.setSelected(true);
+    Count changing;
+    changing.hook(&f.strip, &ChannelStrip::gainChanging);
+
+    const QRect fader = f.strip.faderRect();
+    for (const double fraction : {0.25, 0.5, 0.75}) {
+        const int y = static_cast<int>(fader.bottom() - fraction * fader.height());
+        press(f.strip, QPoint(fader.center().x(), y));
+        release(f.strip, QPoint(fader.center().x(), y));
+        const double expected = pipeeq::taper::normToDb(
+            static_cast<double>(fader.bottom() - y) / (fader.height() - 1));
+        CHECK_NEAR(changing.values.value(changing.n - 1), expected, 1e-6);
+    }
 }
 
 // ----------------------------------------------------------- the meter is not --
@@ -373,6 +450,38 @@ void testPressingASendMeterDoesNotMoveItsFader() {
     CHECK_EQ(changes, 1);
 }
 
+// Up is louder here too. Same gap, same reason: nothing in this suite looked
+// at a send's value, only at whether one was emitted.
+void testDraggingASendUpRaisesItsLevel() {
+    SendFixture f;
+    QVector<double> values;
+    QObject::connect(&f.strip, &pipeeq::SendStrip::levelChanging, &f.strip,
+                      [&](double value) { values.push_back(value); });
+
+    const QRect fader = f.strip.faderRect();
+    const QPoint low(fader.center().x(), fader.bottom() - 1);
+    const QPoint high(fader.center().x(), fader.top() + 1);
+
+    QMouseEvent atLow(QEvent::MouseButtonPress, low, f.strip.mapToGlobal(low), Qt::LeftButton,
+                       Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(&f.strip, &atLow);
+    QMouseEvent up(QEvent::MouseButtonRelease, low, f.strip.mapToGlobal(low), Qt::LeftButton,
+                    Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(&f.strip, &up);
+
+    QMouseEvent atHigh(QEvent::MouseButtonPress, high, f.strip.mapToGlobal(high), Qt::LeftButton,
+                        Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(&f.strip, &atHigh);
+
+    CHECK_EQ(values.size(), 2);
+    if (values.size() == 2) {
+        CHECK(values.at(1) > values.at(0));
+        CHECK(values.at(1) > pipeeq::taper::kMaxDb - 1.5);
+        CHECK(pipeeq::taper::isSilent(values.at(0)) ||
+              values.at(0) <= pipeeq::taper::kMinDb + 1.5);
+    }
+}
+
 // The two rows are the same width by construction, not by two constants that
 // happen to agree.
 void testSendAndMixerStripsShareABaseWidth() {
@@ -390,6 +499,18 @@ int eqWidth(int panelWidth, const pipeeq::strip::SendsPlan& plan) {
     return panelWidth - kMargins - pipeeq::strip::kBodySpacing - plan.width;
 }
 
+// The stated design, asserted as numbers rather than by reference to itself.
+//
+// Every other check here compares against the constants, so it passes whatever
+// they hold: "up to double" is satisfied by a cap of 5, and "the EQ keeps 40%"
+// by a share of 5%. This is the one place the intended values are written down
+// twice on purpose, so changing one of them has to be deliberate.
+void testTheStatedMetricsAreWhatWasAskedFor() {
+    CHECK_NEAR(pipeeq::strip::kMaxWidthScale, 2.0, 1e-9);       // "up to double"
+    CHECK_NEAR(pipeeq::strip::kEqMinimumShare, 0.40, 1e-9);     // "at least 40%"
+    CHECK_EQ(pipeeq::SendStrip::naturalWidth(), pipeeq::strip::kBaseWidth);
+}
+
 // The default: the sends match the mixer strips below.
 void testSendsMatchTheMixerStripsWhenThereIsRoom() {
     const auto plan = pipeeq::strip::planSends(1904, kMargins, 4, 300, 2.0);
@@ -402,10 +523,24 @@ void testSendsMatchTheMixerStripsWhenThereIsRoom() {
 
 // The rule that motivated all of this: sends grow with the number of inputs,
 // the EQ does not, so at some point the sends have to give way.
+//
+// Asserted as an EXACT scale and width, not as an inequality. "Less than
+// double and at least natural" is satisfied by collapsing straight back to
+// natural width the instant any reduction is needed - which throws away the
+// whole point of the rule, that the sends take the requested scale as far as
+// what is left allows. It is also satisfied by an off-by-one in the spacing
+// term, because over-counting spacing hands the EQ more room and the floor is
+// one-sided. Both were live: neither was caught before this.
 void testSendsNarrowRatherThanCrowdingTheEq() {
     const auto plan = pipeeq::strip::planSends(1000, kMargins, 8, 300, 2.0);
+
+    // body = 1000 - 16 - 10 = 974; the EQ's 40% floor is 400, so the sends may
+    // have 574. Eight strips carry seven gaps, so each gets (574 - 35) / 8 px.
+    const int perStrip = (574 - 7 * pipeeq::strip::kSendSpacing) / 8;
+    CHECK_NEAR(plan.scale, static_cast<double>(perStrip) / pipeeq::strip::kBaseWidth, 1e-9);
+    CHECK(plan.scale > 1.0); // it really is scaling, not falling back
     CHECK(plan.scale < 2.0);
-    CHECK(plan.scale >= 1.0);
+    CHECK_EQ(plan.width, 8 * perStrip + 7 * pipeeq::strip::kSendSpacing);
     CHECK(eqWidth(1000, plan) >= static_cast<int>(1000 * pipeeq::strip::kEqMinimumShare));
 }
 
@@ -415,6 +550,11 @@ void testSendsNarrowRatherThanCrowdingTheEq() {
 void testSendsNeverShrinkBelowTheirNaturalWidth() {
     const auto plan = pipeeq::strip::planSends(940, kMargins, 12, 300, 2.0);
     CHECK_NEAR(plan.scale, 1.0, 1e-9);
+    // body = 940 - 16 - 10 = 914, the EQ floor is 376, so the sends get 538 -
+    // less than twelve natural strips need, and the column is capped there so
+    // the row scrolls. Asserted exactly, so a cap that quietly handed the EQ
+    // less than its floor would show up here.
+    CHECK_EQ(plan.width, 914 - 376);
     CHECK(eqWidth(940, plan) >= static_cast<int>(940 * pipeeq::strip::kEqMinimumShare));
 }
 
@@ -433,14 +573,26 @@ void testHeaderIsAFloorOnTheColumnWidth() {
     CHECK_EQ(oneStrip.width, 300); // one strip is narrower than the header
 }
 
-// The invariant, swept rather than sampled: across every window width the
-// application permits and every send count it allows, the EQ keeps its share
-// and the scale stays within bounds. This is the check that would catch an
-// off-by-one in the arithmetic at a size no screenshot was ever taken at.
+// The invariants, swept rather than sampled: across every window width the
+// application permits and every send count it allows, the EQ keeps its share,
+// the scale stays within bounds, and - the one that was missing - the strips
+// FIT the column the same plan sizes for them.
+//
+// That last one was violated for real. The scale was derived from exact
+// fractional widths while each strip rounds its own width half up, so a few
+// strips overran the column by 1-3 px, the column was clamped to what the EQ
+// could spare, and the row grew the horizontal scrollbar this rule exists to
+// avoid - taking ~15 px off the strips' height with it, in precisely the
+// regime where the EQ's floor is binding.
 void testEqKeepsItsShareAcrossEveryWindowAndInputCount() {
+    int atFullScale = 0;
+    int partiallyScaled = 0;
+    int atNaturalWidth = 0;
+
     for (int panelWidth = 940; panelWidth <= 3840; panelWidth += 37) {
-        for (int sends = 0; sends <= 8; ++sends) {
+        for (int sends = 1; sends <= 12; ++sends) {
             const auto plan = pipeeq::strip::planSends(panelWidth, kMargins, sends, 300, 2.0);
+
             const int floorWidth = static_cast<int>(panelWidth * pipeeq::strip::kEqMinimumShare);
             if (eqWidth(panelWidth, plan) < floorWidth) {
                 CHECK_EQ(eqWidth(panelWidth, plan), floorWidth); // reports the offending size
@@ -450,9 +602,35 @@ void testEqKeepsItsShareAcrossEveryWindowAndInputCount() {
                 CHECK_NEAR(plan.scale, 1.0, 0.0); // ditto
                 return;
             }
+
+            // Rounded exactly as SendStrip::scaledWidth() rounds it.
+            const int perStrip =
+                static_cast<int>(pipeeq::strip::kBaseWidth * plan.scale + 0.5);
+            const int stripsWidth =
+                sends * perStrip + pipeeq::strip::kSendSpacing * (sends - 1);
+            // Only where the column is sized by its strips; where the header or
+            // the hard floor sets the width, the row scrolls by design.
+            if (stripsWidth > plan.width && plan.scale > 1.0) {
+                CHECK_EQ(stripsWidth, plan.width); // reports the offending size
+                return;
+            }
+
+            if (plan.scale >= pipeeq::strip::kMaxWidthScale) {
+                ++atFullScale;
+            } else if (plan.scale > 1.0) {
+                ++partiallyScaled;
+            } else {
+                ++atNaturalWidth;
+            }
         }
     }
-    CHECK(true);
+
+    // A sweep that never reaches the boundary proves nothing about it. All
+    // three regimes have to appear, or the invariants above were only ever
+    // checked where they could not have been violated.
+    CHECK(atFullScale > 0);
+    CHECK(partiallyScaled > 0);
+    CHECK(atNaturalWidth > 0);
 }
 
 } // namespace
@@ -477,9 +655,14 @@ int main(int argc, char** argv) {
     RUN(testWidthScaleIsClamped);
     RUN(testHitTestingFollowsTheWidthScale);
 
+    RUN(testDraggingUpRaisesTheGain);
+    RUN(testPressMapsThroughTheSharedTaper);
+
     RUN(testPressingASendMeterDoesNotMoveItsFader);
+    RUN(testDraggingASendUpRaisesItsLevel);
     RUN(testSendAndMixerStripsShareABaseWidth);
 
+    RUN(testTheStatedMetricsAreWhatWasAskedFor);
     RUN(testSendsMatchTheMixerStripsWhenThereIsRoom);
     RUN(testSendsNarrowRatherThanCrowdingTheEq);
     RUN(testSendsNeverShrinkBelowTheirNaturalWidth);

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include <QAbstractSpinBox>
+#include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
@@ -104,7 +106,7 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
             statusLabel_->setText(message);
         }
     });
-    rootLayout_->addWidget(stripRack_);
+    rootLayout_->addWidget(stripRack_, 1);
 
     setCentralWidget(central);
     applyDetailSizing(0);
@@ -112,17 +114,31 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
     // Window-level shortcuts, so linking works wherever focus happens to be.
     auto* linkShortcut = new QShortcut(QKeySequence(Qt::Key_L), this);
     connect(linkShortcut, &QShortcut::activated, stripRack_, &StripRack::linkMarkedChannels);
-    // Escape means "back out of what I'm in": the EQ editor first, then any
-    // pending link selection. Ordered rather than split across two keys,
-    // because from the editor's point of view there is nothing else Escape
-    // could plausibly mean, and link marks are not visible from there anyway.
+    // Escape means "back out of what I am in", innermost first.
+    //
+    // A number field being edited is the innermost thing of all: Escape in a
+    // spin box means "forget what I typed", and a QDoubleSpinBox does not
+    // consume the key, so without this it reached the window shortcut, the page
+    // switched, the box lost focus - and losing focus COMMITTED the half-typed
+    // value. The one key that universally cancels an edit was applying it.
+    //
+    // Then a pending link selection, which the rack reports on so an Escape
+    // that cleared something does not also leave the editor. The rack is fully
+    // visible from the EQ page and its link marks paint there, so an earlier
+    // comment claiming otherwise was simply wrong.
     auto* escapeShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     connect(escapeShortcut, &QShortcut::activated, this, [this] {
-        if (detailStack_->currentIndex() == 1) {
-            detailStack_->setCurrentIndex(0);
+        if (auto* spin = qobject_cast<QAbstractSpinBox*>(QApplication::focusWidget())) {
+            spin->interpretText(); // discards the pending text, keeps the value
+            spin->selectAll();
             return;
         }
-        stripRack_->clearLinkMarks();
+        if (stripRack_->clearLinkMarks()) {
+            return;
+        }
+        if (detailStack_->currentIndex() == 1) {
+            detailStack_->setCurrentIndex(0);
+        }
     });
 
     statusLabel_ = new QLabel(this);
@@ -192,12 +208,23 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 // How the window's height is divided between the mixer row and the detail area
 // above it.
 //
-// The rack is given a definite height and the detail area absorbs the rest,
-// because a fader's travel should be a usable size rather than however much
-// room happens to be left over. But that height used to be a CONSTANT, which
-// meant every pixel of extra window height went to a detail area whose contents
-// were pinned to their minimums - so a tall window grew nothing but a band of
-// empty space between the two. It now scales with the window, within bounds.
+// The rack is BOUNDED rather than fixed, and the layout does the arithmetic.
+//
+// Fixing its height made it a constraint the root layout had to satisfy, which
+// meant predicting the split by hand - and every version of that prediction was
+// wrong in a way that showed up as widgets drawn on top of each other. The
+// window's own minimum was computed assuming the rack sat at its floor, which
+// is only true on the EQ page; capping the rack by hand needed the height of
+// the window chrome, which cannot be had from size hints (they sum to 81 px
+// where the true figure is 99 - QMainWindow contributes the difference around
+// its central widget) and measuring it back off the layout converged on
+// different answers depending on when it was asked.
+//
+// With a minimum and a maximum instead, and stretch on both rows, Qt is free to
+// trade: the rack takes what it can up to the ceiling, and the detail area's
+// own minimum is never violated because the rack can give way to its floor. No
+// explicit window minimum either - the layout's is exact, and setting one by
+// hand only suppresses it.
 void MainWindow::applyDetailSizing(int pageIndex) {
     const bool editingEq = pageIndex == 1;
 
@@ -208,55 +235,41 @@ void MainWindow::applyDetailSizing(int pageIndex) {
     // clipped the mute/link row off the bottom of every strip.
     const int floorHeight = stripRack_->contentMinimumHeight();
 
-    int rackHeight = floorHeight;
-    if (!editingEq) {
-        // On the mixer page the rack is the primary surface, so it takes a share
-        // of the height. The ceiling is the "within reason" part: past roughly
-        // 240 px of extra travel a fader is just harder to aim, and the sends
-        // and EQ curve make better use of the room.
-        // The WINDOW's height, not the central widget's. In resizeEvent the
-        // central widget has not been laid out to the new size yet, so asking it
-        // returns the previous height - which on the way up from the default
-        // geometry is small enough that the clamp always chose the floor, and
-        // the rack never grew at all.
-        rackHeight = std::clamp(height() * 44 / 100, floorHeight, floorHeight + 240);
-    }
+    // On the mixer page the rack is the primary surface, so it may grow. The
+    // ceiling is the "within reason" part: past roughly 240 px of extra travel
+    // a fader is just harder to aim, and the sends and EQ curve make better use
+    // of the room. On the EQ page it collapses to its floor so the curve gets
+    // everything else - the selection stays visible, which is the point of not
+    // hiding it outright.
+    const int ceiling =
+        editingEq ? floorHeight : std::clamp(height() * 44 / 100, floorHeight, floorHeight + 240);
 
-    if (stripRack_->maximumHeight() != rackHeight || stripRack_->minimumHeight() != rackHeight) {
-        stripRack_->setMinimumHeight(rackHeight);
-        stripRack_->setMaximumHeight(rackHeight);
+    if (stripRack_->minimumHeight() != floorHeight) {
+        stripRack_->setMinimumHeight(floorHeight);
     }
-    applyMinimumHeight(floorHeight);
-}
+    if (stripRack_->maximumHeight() != ceiling) {
+        stripRack_->setMaximumHeight(ceiling);
+    }
+    // Ask for the ceiling. The layout hands out space by size hint first and
+    // only then by stretch, so a rack that asks for nothing in particular is
+    // given nothing in particular - it settled 167 px below its ceiling on a
+    // 1150 px window, and the strips stopped growing well before they should.
+    // When the window is too small for both rows' hints, Qt shrinks them
+    // towards their minimums instead, which is what keeps the detail area above
+    // its own.
+    stripRack_->setPreferredHeight(ceiling);
 
-// The window's minimum height, derived rather than chosen.
-//
-// It cannot be left to Qt: giving the rack a definite height makes it a
-// constraint the root layout must satisfy, and an explicit minimum on a window
-// overrides the layout's own. So when the number here is too small, Qt has no
-// way to honour every constraint and resolves it by letting widgets OVERLAP -
-// which is what happened the moment the band controls grew knobs: at 600 px the
-// band ribbon was drawn on top of the EQ curve. A hardcoded number is wrong
-// again every time the content changes height, so it is measured.
-void MainWindow::applyMinimumHeight(int rackFloor) {
-    const QMargins margins = rootLayout_->contentsMargins();
-    // The detail stack reports the tallest of its pages, which is the EQ editor.
-    const int wanted = margins.top() + margins.bottom() + 2 * rootLayout_->spacing() +
-                        deviceCombo_->sizeHint().height() + rackFloor +
-                        detailStack_->minimumSizeHint().height() +
-                        statusBar()->sizeHint().height();
-    if (minimumHeight() != wanted) {
-        setMinimumHeight(wanted);
-    }
-    // And grow to it if we are already smaller. Setting the minimum is not
-    // enough on its own: it is published to the window manager as a hint, which
-    // constrains what the USER can drag the window to but does not resize a
-    // window that is already below it. Two ways to get there - a geometry
-    // restored from a session before the content grew, and the startup resize
-    // landing before the rack has been measured - and both showed as widgets
-    // drawn on top of each other.
-    if (height() < wanted) {
-        resize(width(), wanted);
+    // Grow to the layout's own minimum if we are below it.
+    //
+    // Qt's minimum constrains what the window manager will let the user drag
+    // the window to, but nothing clamps a resize() the program itself made
+    // before the layout existed - which is how the window opened 58 px short of
+    // its minimum and drew the band controls over the EQ curve. minimumSizeHint
+    // is the layout's own figure, so unlike the arithmetic this replaces it
+    // cannot disagree with what the layout will actually do.
+    const int required = minimumSizeHint().height();
+    if (height() < required) {
+        resize(width(), required);
     }
 }
 
@@ -345,6 +358,14 @@ void MainWindow::refreshStrips() {
     } else {
         currentStripId_.clear();
         detailPanel_->setSelection(QString());
+        // And the editor, which was left showing a removed channel's curve -
+        // title, ribbon and knobs all live, all writing nowhere. Its refresh()
+        // already renders "No channel selected"; it was simply never called.
+        // Back to the mixer too: an editor for nothing is not a page to sit on.
+        eqEditor_->setSelection(QString());
+        if (detailStack_->currentIndex() == 1) {
+            detailStack_->setCurrentIndex(0);
+        }
         updateStripStatus();
     }
 }
@@ -392,10 +413,17 @@ void MainWindow::updateStripStatus() {
 // ----------------------------------------------------------------- selection --
 
 void MainWindow::selectStrip(const QString& stripId) {
+    const bool sameStrip = stripId == currentStripId_;
     stripRack_->setSelectedStripId(stripId);
     currentStripId_ = stripId;
     detailPanel_->setSelection(stripId);
-    eqEditor_->setSelection(stripId);
+    // Only when the selection actually MOVED. setSelection resets the editor to
+    // band 1, so re-selecting the strip you are already on - which is now the
+    // common case, since clicking a strip's meter is the safe way to select it
+    // - threw away the band you were editing, and cost a round trip per click.
+    if (!sameStrip) {
+        eqEditor_->setSelection(stripId);
+    }
     if (const StripRow* strip = findStrip(stripId)) {
         loadStripDetail(*strip);
     }

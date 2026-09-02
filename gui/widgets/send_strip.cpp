@@ -64,6 +64,9 @@ void SendStrip::changeEvent(QEvent* event) {
 
 void SendStrip::setInput(const InputRow& input) {
     input_ = input;
+    setAccessibleName(QString("Send from %1").arg(input.displayName));
+    setAccessibleDescription(
+        QStringLiteral("Up and down arrows set the level, space switches the send on or off."));
     // Recomputed here as well as on resize, the way the mixer strip does it on
     // setStrips. Depending on a resize event alone leaves the layout - and so
     // every hit-test - empty until one arrives, which is a state the widget
@@ -228,8 +231,11 @@ void SendStrip::applyLevelFromY(int y) {
     if (layout_.fader.height() <= 0) {
         return;
     }
-    const double norm = std::clamp(
-        static_cast<double>(layout_.fader.bottom() - y) / layout_.fader.height(), 0.0, 1.0);
+    // height() - 1: bottom() is the last pixel of the track, so dividing by the
+    // full height leaves the topmost pixel short of maximum.
+    const double travel = std::max(1, layout_.fader.height() - 1);
+    const double norm =
+        std::clamp(static_cast<double>(layout_.fader.bottom() - y) / travel, 0.0, 1.0);
     commitLevel(taper::normToDb(norm));
 }
 
@@ -291,10 +297,62 @@ void SendStrip::mouseDoubleClickEvent(QMouseEvent* event) {
     }
 }
 
+// A send strip takes focus, so it is a tab stop - and it had no key handling at
+// all, which made every one of them a dead stop with no keyboard way to switch
+// a send on or set its level. Narrowing the press region to the fader made that
+// worse, not better.
+void SendStrip::keyPressEvent(QKeyEvent* event) {
+    const auto nudge = [&](double delta) {
+        if (!routed_) {
+            return;
+        }
+        const double current = taper::isSilent(level()) ? taper::kMinDb : level();
+        emit levelEditBegan();
+        commitLevel(std::clamp(current + delta, taper::kMinDb, taper::kMaxDb));
+        emit levelEditFinished();
+    };
+
+    switch (event->key()) {
+    case Qt::Key_Up:
+        nudge(event->modifiers() & Qt::ShiftModifier ? 0.2 : 1.0);
+        return;
+    case Qt::Key_Down:
+        nudge(event->modifiers() & Qt::ShiftModifier ? -0.2 : -1.0);
+        return;
+    case Qt::Key_PageUp:
+        nudge(6.0);
+        return;
+    case Qt::Key_PageDown:
+        nudge(-6.0);
+        return;
+    case Qt::Key_Home:
+        if (routed_) {
+            emit levelEditBegan();
+            commitLevel(taper::kUnityDb);
+            emit levelEditFinished();
+        }
+        return;
+    case Qt::Key_Space:
+    case Qt::Key_Return:
+    case Qt::Key_Enter:
+        if (routed_ || canRoute_) {
+            emit routedToggled(!routed_);
+        }
+        return;
+    default:
+        break;
+    }
+    QWidget::keyPressEvent(event);
+}
+
 void SendStrip::wheelEvent(QWheelEvent* event) {
     if (!routed_ || (!layout_.fader.contains(event->position().toPoint()) &&
                       !layout_.meterArea.contains(event->position().toPoint()))) {
         event->ignore();
+        return;
+    }
+    if (event->angleDelta().y() == 0) {
+        event->ignore(); // horizontal wheel: not a level change
         return;
     }
     const double steps = event->angleDelta().y() / 120.0;

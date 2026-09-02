@@ -85,6 +85,19 @@ void StripRack::resizeEvent(QResizeEvent* event) {
     applyWidthScale();
 }
 
+void StripRack::setPreferredHeight(int height) {
+    if (height == preferredHeight_) {
+        return;
+    }
+    preferredHeight_ = height;
+    updateGeometry();
+}
+
+QSize StripRack::sizeHint() const {
+    const QSize base = QScrollArea::sizeHint();
+    return preferredHeight_ > 0 ? QSize(base.width(), preferredHeight_) : base;
+}
+
 int StripRack::contentMinimumHeight() const {
     return chromeHeight_ + stripMinimumHeight();
 }
@@ -273,11 +286,32 @@ void StripRack::linkMarkedChannels() {
     linkChannels(anchor, marked);
 }
 
-void StripRack::clearLinkMarks() {
-    linkMarks_.clear();
+// Returns whether there was anything to clear, so a caller can tell an Escape
+// that did something from one that did not.
+bool StripRack::clearLinkMarks() {
+    // A drag in flight counts: Escape should abandon the gesture actually being
+    // made, not only the marks left by previous clicks.
+    bool cleared = false;
+    if (linkDragSource_ != nullptr || linkDropTarget_ != nullptr) {
+        if (linkDropTarget_) {
+            linkDropTarget_->setLinkDropTarget(false);
+            linkDropTarget_ = nullptr;
+        }
+        linkDragSource_ = nullptr;
+        cleared = true;
+    }
+    if (!linkMarks_.isEmpty()) {
+        linkMarks_.clear();
+        cleared = true;
+    }
     applyLinkMarks();
-
-    emit statusMessage(QString());
+    if (cleared) {
+        // Only when something was cleared. Emitting unconditionally wiped
+        // whatever the status bar was reporting, including an error the user
+        // had not read yet.
+        emit statusMessage(QString());
+    }
+    return cleared;
 }
 
 void StripRack::connectStrip(ChannelStrip* strip) {
@@ -330,6 +364,17 @@ void StripRack::connectStrip(ChannelStrip* strip) {
         if (linkDropTarget_) {
             linkDropTarget_->setLinkDropTarget(true);
         }
+    });
+    // Abandoned rather than dropped: clear the highlight and the source, and
+    // propose nothing. Without this a link drag interrupted by a rebuild left
+    // linkDragSource_ set, and the NEXT click anywhere in the rack arrived as a
+    // drop - offering to link two channels the user never dragged between.
+    connect(strip, &ChannelStrip::linkDragCancelled, this, [this] {
+        if (linkDropTarget_) {
+            linkDropTarget_->setLinkDropTarget(false);
+            linkDropTarget_ = nullptr;
+        }
+        linkDragSource_ = nullptr;
     });
     connect(strip, &ChannelStrip::linkDragFinished, this, [this, strip](const QPoint& globalPos) {
         ChannelStrip* target = stripAtGlobalPos(globalPos);
@@ -524,7 +569,15 @@ void StripRack::rebuild() {
         strip->setSelected(cluster.members.front().id == selectedStripId_ ||
                             std::any_of(cluster.members.begin(), cluster.members.end(),
                                         [&](const StripRow& m) { return m.id == selectedStripId_; }));
-        blockStripsWidth += strip->naturalWidth() + (blockStripsWidth > 0 ? 4 : 0);
+        // Only what is actually shown. Counting a collapsed device's hidden
+        // strips reserved width for them, so collapsing an absent interface -
+        // the remedy the UI offers for exactly this - gave none of its room
+        // back and the remaining strips never widened.
+        const bool blockCollapsed = !cluster.members.front().connected &&
+                                     collapsedDevices_.contains(cluster.deviceName);
+        if (!blockCollapsed) {
+            blockStripsWidth += strip->naturalWidth() + (blockStripsWidth > 0 ? 4 : 0);
+        }
         deviceStripsLayout->insertWidget(deviceStripsLayout->count() - 1, strip);
         strip->setVisible(deviceStripsLayout->parentWidget()->isVisibleTo(content_) ||
                            !collapsedDevices_.contains(cluster.deviceName));

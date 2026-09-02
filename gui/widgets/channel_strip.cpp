@@ -26,9 +26,15 @@ constexpr int kMeterWidth = 9;
 // adjustment near unity.
 constexpr double kFineDragFactor = 0.25;
 
-// How far the pointer must travel before a press on an unselected strip's fader
-// counts as a drag rather than a click.
-constexpr int kDragThresholdPx = 3;
+// How far the pointer must travel VERTICALLY before a press on an unselected
+// strip's fader counts as a drag rather than a click.
+//
+// Vertical only: a sideways wobble is not evidence of intent to move a vertical
+// fader, and measuring both axes handed back the exact jump the select-first
+// rule removes - a 3 px sideways slide on an unselected strip moved it 27 dB.
+// The distance is Qt's own startDragDistance rather than a few pixels, because
+// at 3 px the whole protection was two pixels wide.
+constexpr int kDragThresholdPx = 10;
 
 QString formatDb(double db) {
     if (taper::isSilent(db)) {
@@ -84,7 +90,9 @@ QString stripLabel(const QVector<StripRow>& strips) {
 ChannelStrip::ChannelStrip(const LevelMeters* meters, QWidget* parent)
     : QWidget(parent), meters_(meters) {
     setFocusPolicy(Qt::StrongFocus);
-    setMouseTracking(true);
+    // Nothing here paints or hit-tests on hover, so tracking only invites the
+    // buttonless move events that mouseMoveEvent now has to reject anyway.
+    setMouseTracking(false);
     tokens_ = theme::tokensFor(this);
     accent_ = tokens_.accent;
 }
@@ -98,6 +106,19 @@ void ChannelStrip::changeEvent(QEvent* event) {
 
 void ChannelStrip::setStrips(const QVector<StripRow>& strips) {
     strips_ = strips;
+    // Custom-painted widgets expose nothing by default, so without this a
+    // screen reader gets no information about the mixer whatsoever.
+    if (!strips_.isEmpty()) {
+        const StripRow& first = strips_.front();
+        const QString name = first.channelName.isEmpty() ? first.position : first.channelName;
+        setAccessibleName(QString("%1 %2 fader").arg(first.outputName, name));
+        setAccessibleDescription(
+            strips_.size() > 1
+                ? QString("Linked group of %1 channels. Up and down arrows adjust the gain, M "
+                           "mutes.")
+                      .arg(strips_.size())
+                : QStringLiteral("Up and down arrows adjust the gain, M mutes."));
+    }
     // A snapshot arriving mid-drag must not fight the local value; the store
     // guards the write, and this guards the display.
     if (!draggingFader_) {
@@ -425,8 +446,13 @@ void ChannelStrip::applyGainFromY(int y) {
     if (track.height() <= 0) {
         return;
     }
-    const double norm =
-        std::clamp(static_cast<double>(track.bottom() - y) / track.height(), 0.0, 1.0);
+    // height() - 1, because bottom() is the LAST pixel of the track, not one
+    // past it. Dividing by the full height made the topmost pixel yield
+    // (h-1)/h, so a click on the very top of the fader landed short of maximum
+    // and the only way to reach it was to drag past the edge and let the clamp
+    // catch it.
+    const double travel = std::max(1, track.height() - 1);
+    const double norm = std::clamp(static_cast<double>(track.bottom() - y) / travel, 0.0, 1.0);
     commitGain(taper::normToDb(norm));
 }
 
@@ -509,6 +535,25 @@ void ChannelStrip::mousePressEvent(QMouseEvent* event) {
 }
 
 void ChannelStrip::mouseMoveEvent(QMouseEvent* event) {
+    // No button, no gesture.
+    //
+    // Without this the widget will happily edit a gain from a bare hover. It
+    // takes only a lost release to get there, and a release IS lost whenever
+    // something breaks the implicit grab - and StripRack::rebuild() breaks it
+    // on every strip, by design, with setParent(nullptr). So a device
+    // appearing or disappearing while a fader is held (a headset connecting,
+    // another application switching a card profile) left the strip stuck in a
+    // drag: every subsequent pointer movement over it, anywhere on it, wrote a
+    // new gain. On an audio tool that is a loudness hazard, and the only way
+    // out - click the fader once - is not discoverable.
+    //
+    // Comments elsewhere in this file used to assert that reparenting cannot
+    // drop a drag. It drops it exactly as completely as deleting the widget
+    // would, and worse: the widget survives, holding the stuck state.
+    if (!(event->buttons() & Qt::LeftButton)) {
+        cancelGesture();
+        return;
+    }
     if (draggingLink_) {
         emit linkDragMoved(event->globalPosition().toPoint());
         return;
@@ -518,7 +563,7 @@ void ChannelStrip::mouseMoveEvent(QMouseEvent* event) {
         // plainly what it means - so the fader takes it even though this strip
         // was not selected when the press landed. The threshold is what keeps a
         // click with a pixel of hand tremor from counting as one.
-        if ((event->pos() - faderPressPos_).manhattanLength() < kDragThresholdPx) {
+        if (std::abs(event->pos().y() - faderPressPos_.y()) < kDragThresholdPx) {
             return;
         }
         faderArmed_ = false;
@@ -536,9 +581,9 @@ void ChannelStrip::mouseMoveEvent(QMouseEvent* event) {
             return;
         }
         const double currentNorm = taper::dbToNorm(gainDb());
+        const double travel = std::max(1, track.height() - 1);
         const double targetNorm =
-            std::clamp(static_cast<double>(track.bottom() - event->pos().y()) / track.height(), 0.0,
-                        1.0);
+            std::clamp(static_cast<double>(track.bottom() - event->pos().y()) / travel, 0.0, 1.0);
         const double blended = currentNorm + (targetNorm - currentNorm) * kFineDragFactor;
         commitGain(taper::normToDb(blended));
         return;
@@ -562,8 +607,39 @@ void ChannelStrip::mouseReleaseEvent(QMouseEvent* event) {
     emit gainEditFinished();
 }
 
+// Abandons whatever gesture was in flight, closing the edit if one was open so
+// the store's guard is released rather than left holding.
+void ChannelStrip::cancelGesture() {
+    if (draggingFader_) {
+        draggingFader_ = false;
+        emit gainEditFinished();
+    }
+    faderArmed_ = false;
+    if (draggingLink_) {
+        draggingLink_ = false;
+        // Deliberately NOT linkDragFinished: there is no drop position, and
+        // reporting one would propose a link the user never released over.
+        emit linkDragCancelled();
+    }
+}
+
+void ChannelStrip::hideEvent(QHideEvent* event) {
+    // Covers the reparent in StripRack::rebuild(), which hides the widget on
+    // the way out, and the EQ editor page being switched away from mid-drag.
+    cancelGesture();
+    QWidget::hideEvent(event);
+}
+
 void ChannelStrip::mouseDoubleClickEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) {
+        return;
+    }
+    // Only on a strip already selected, for the same reason a single click is:
+    // the sequence is press, release, double-click, so the first click of a
+    // double-click on a strip you are not on is the one that selects it - and
+    // jumping to unity from there is a 20 dB change on the first touch, which
+    // is the surprise the select-first rule exists to prevent.
+    if (!selected_) {
         return;
     }
     if (layout_.fader.contains(event->pos()) || layout_.readout.contains(event->pos())) {
@@ -572,6 +648,19 @@ void ChannelStrip::mouseDoubleClickEvent(QMouseEvent* event) {
         emit gainEditBegan();
         commitGain(taper::kUnityDb);
         emit gainEditFinished();
+        return;
+    }
+    // A second fast click on the mute pill or the link badge arrives as a
+    // double-click, not a press, so without this it is swallowed - and
+    // double-tapping mute is a reflex.
+    if (layout_.mute.contains(event->pos())) {
+        if (!strips_.isEmpty()) {
+            emit muteToggled(!strips_.front().muted);
+        }
+        return;
+    }
+    if (layout_.clip.contains(event->pos())) {
+        emit clipClearRequested();
     }
 }
 
@@ -580,6 +669,16 @@ void ChannelStrip::wheelEvent(QWheelEvent* event) {
         !layout_.meterArea.contains(event->position().toPoint())) {
         // Anywhere else on the strip, let the rack scroll horizontally. Without
         // this discipline, scrolling the rack randomly changes gains.
+        event->ignore();
+        return;
+    }
+
+    if (event->angleDelta().y() == 0) {
+        // A horizontal wheel - a two-finger sideways swipe. Accepting it wrote
+        // the current gain straight back (turning a silent channel into -65 dB
+        // and sending a pointless write) and swallowed the only gesture that
+        // scrolls the rack, over the tall middle of every strip, which is most
+        // of the rack's area.
         event->ignore();
         return;
     }
@@ -603,7 +702,14 @@ void ChannelStrip::keyPressEvent(QKeyEvent* event) {
     // A full keyboard path matters more than usual here: once stock widgets are
     // gone, nothing is reachable without one.
     const double current = taper::isSilent(gainDb()) ? taper::kMinDb : gainDb();
+    // Keyboard edits select first, the same way a mouse press does. Without it
+    // select-first was a mouse-only rule: arrow keys on a focused-but-unselected
+    // strip moved its gain while the detail panel and the EQ page went on
+    // showing a different channel entirely.
     const auto nudge = [&](double delta) {
+        if (!selected_) {
+            emit selectRequested();
+        }
         emit gainEditBegan();
         commitGain(std::clamp(current + delta, taper::kMinDb, taper::kMaxDb));
         emit gainEditFinished();
@@ -623,11 +729,17 @@ void ChannelStrip::keyPressEvent(QKeyEvent* event) {
         nudge(-6.0);
         return;
     case Qt::Key_Home:
+        if (!selected_) {
+            emit selectRequested();
+        }
         emit gainEditBegan();
         commitGain(taper::kUnityDb);
         emit gainEditFinished();
         return;
     case Qt::Key_End:
+        if (!selected_) {
+            emit selectRequested();
+        }
         emit gainEditBegan();
         commitGain(taper::kSilenceDb);
         emit gainEditFinished();

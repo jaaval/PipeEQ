@@ -53,9 +53,16 @@ public:
     // every strip once absent devices grew a collapse button.
     int contentMinimumHeight() const;
 
+    // The height the rack ASKS for. A QScrollArea's own hint has nothing to do
+    // with its content, and the root layout weighs hints, not just bounds - so
+    // without this the rack sat far below its ceiling however much room there
+    // was, and the strips stopped growing.
+    void setPreferredHeight(int height);
+    QSize sizeHint() const override;
+
     // Links whatever is currently marked. Also reachable with the L key.
     void linkMarkedChannels();
-    void clearLinkMarks();
+    bool clearLinkMarks();
     int markedCount() const { return static_cast<int>(linkMarks_.size()); }
 
 signals:
@@ -102,6 +109,7 @@ private:
     // Height the tallest device block adds around its strips row, plus the
     // content margins and the frame. Recomputed in rebuild().
     int chromeHeight_ = 26;
+    int preferredHeight_ = 0;
     // Width the strips and their block chrome want at scale 1. Recomputed in
     // rebuild().
     int naturalContentWidth_ = 0;

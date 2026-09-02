@@ -58,7 +58,6 @@ private slots:
 
 private:
     void applyDetailSizing(int pageIndex);
-    void applyMinimumHeight(int rackFloor);
     void restoreSession();
     void saveSession() const;
     void selectStrip(const QString& stripId);

@@ -34,7 +34,7 @@ fail() {
     FAILED=1
 }
 
-for tool in xvfb-run import compare python3; do
+for tool in xvfb-run import compare magick python3; do
     if ! command -v "$tool" > /dev/null; then
         echo "INCOMPLETE: $tool is not installed, so keyboard bindings were not checked." >&2
         exit 1
@@ -114,8 +114,11 @@ run_gui() {
             python3 '$WORKDIR/sendkey.py' '$key' 2>>'$WORKDIR/inject.log' || echo INJECT_FAILED >> '$WORKDIR/inject.log'
         fi
         import -window root '$out'
+        # Bounded. SIGTERM alone leaves a GUI that ignores it running, and its
+        # Xvfb with it, which would hang this script rather than fail it.
         kill \$GUI 2>/dev/null
-        wait \$GUI 2>/dev/null
+        timeout 5 tail --pid=\$GUI -f /dev/null 2>/dev/null
+        kill -9 \$GUI 2>/dev/null
     " > /dev/null 2>&1
     [[ -f "$out" ]] || return 1
     magick "$out" -crop "$HEADER_CROP" "${out%.png}_header.png"
@@ -153,9 +156,18 @@ fi
 TO_MIXER="$(header_diff "$WORKDIR/after_escape.png" "$WORKDIR/mixer.png")"
 TO_EDITOR="$(header_diff "$WORKDIR/after_escape.png" "$WORKDIR/editor.png")"
 
-if [[ "$TO_MIXER" -lt "$TO_EDITOR" ]]; then
+# Both tests, not just the comparison. Nearer the mixer page than the editor is
+# not on its own evidence of anything: a capture that resembles NEITHER page -
+# a window that never mapped, say - still lands nearer one of them, and would
+# decide the result by whichever page happens to carry more ink. So it also has
+# to actually look like the mixer page.
+RESEMBLANCE_BOUND=$(( BASELINE / 4 ))
+if [[ "$TO_MIXER" -lt "$TO_EDITOR" && "$TO_MIXER" -lt "$RESEMBLANCE_BOUND" ]]; then
     echo "ok: Escape returns from the EQ editor to the mixer"
     echo "    ($TO_MIXER pixels from the mixer page, $TO_EDITOR from the editor)"
+elif [[ "$TO_MIXER" -ge "$RESEMBLANCE_BOUND" && "$TO_MIXER" -lt "$TO_EDITOR" ]]; then
+    fail "the capture after Escape resembles neither page; the check proves nothing"
+    echo "    ($TO_MIXER pixels from the mixer page, bound $RESEMBLANCE_BOUND)" >&2
 else
     fail "Escape did not leave the EQ editor"
     echo "    ($TO_MIXER pixels from the mixer page, $TO_EDITOR from the editor)" >&2

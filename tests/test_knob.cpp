@@ -133,8 +133,16 @@ void testDragIsMeasuredFromWhereItStarted() {
     CHECK_NEAR(knob.value(), 100.0, 1e-6);
 }
 
-// A long drag arrives as dozens of move events. Accumulating a delta per move
-// would compound the rounding in each one; measuring from the press cannot.
+// A long drag arrives as dozens of move events and must end up where the
+// pointer is, not somewhere accumulated.
+//
+// What this actually pins down is that each move is applied to the position the
+// PRESS was at. Basing it on the current value instead - which is the tempting
+// way to write it - makes every move compound the last and sends the value off
+// the end of the range. It does not, despite an earlier comment here claiming
+// otherwise, demonstrate anything about rounding: a faithful per-move
+// accumulation is the same arithmetic to within 1e-14, far inside the tolerance
+// below. Kept because the bug it does catch is the likely one.
 void testManyMovesInOneDragDoNotDrift() {
     Knob knob;
     knob.setRange(0.0, 1.0);
@@ -327,6 +335,42 @@ void testDoubleClickLeavesTheEditPairBalanced() {
 // setValue is for pushing a value in from outside. If it emitted, selecting a
 // band would look exactly like the user having just edited it, and the editor
 // would write the value straight back to the daemon.
+// A double-click is its own gesture: the release before it closed the previous
+// edit, so it must open one - and it must leave the knob grabbed, or a
+// double-click followed by a drag does nothing at all.
+void testDoubleClickOpensAnEditAndLeavesTheKnobGrabbed() {
+    Knob knob;
+    knob.setRange(-24.0, 24.0);
+    knob.setDefaultValue(0.0);
+    knob.setValue(-12.0);
+
+    int began = 0;
+    int finished = 0;
+    QObject::connect(&knob, &Knob::editBegan, [&] { ++began; });
+    QObject::connect(&knob, &Knob::editFinished, [&] { ++finished; });
+
+    const QPointF centre(knob.width() / 2.0, knob.height() / 2.0);
+    QMouseEvent doubleClick(QEvent::MouseButtonDblClick, centre,
+                             knob.mapToGlobal(centre.toPoint()), Qt::LeftButton, Qt::LeftButton,
+                             Qt::NoModifier);
+    QApplication::sendEvent(&knob, &doubleClick);
+    CHECK_EQ(began, 1);
+    CHECK_EQ(finished, 0);
+    CHECK_NEAR(knob.value(), 0.0, 1e-9);
+
+    // Still grabbed: dragging on from the reset value works without letting go.
+    const QPointF moved(centre.x(), centre.y() - 60);
+    QMouseEvent move(QEvent::MouseMove, moved, knob.mapToGlobal(moved.toPoint()), Qt::NoButton,
+                      Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(&knob, &move);
+    CHECK_NEAR(knob.value(), 12.0, 1e-6); // a quarter sweep up from 0 dB
+
+    QMouseEvent release(QEvent::MouseButtonRelease, moved, knob.mapToGlobal(moved.toPoint()),
+                         Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(&knob, &release);
+    CHECK_EQ(finished, 1);
+}
+
 void testSetValueDoesNotEmit() {
     Knob knob;
     knob.setRange(0.0, 100.0);
@@ -436,6 +480,7 @@ int main(int argc, char** argv) {
 
     RUN(testDragEmitsABalancedEditPair);
     RUN(testDoubleClickLeavesTheEditPairBalanced);
+    RUN(testDoubleClickOpensAnEditAndLeavesTheKnobGrabbed);
     RUN(testSetValueDoesNotEmit);
 
     RUN(testFieldAndKnobStayInStep);

@@ -58,25 +58,34 @@ inline SendsPlan planSends(int panelWidth, int horizontalMargins, int sendCount,
     const int body = panelWidth - horizontalMargins - kBodySpacing;
     const int allowed = body - static_cast<int>(panelWidth * kEqMinimumShare + 0.5);
 
-    double scale = requestedScale < 1.0 ? 1.0 : requestedScale;
-    if (scale > kMaxWidthScale) {
-        scale = kMaxWidthScale;
+    // Worked out as an INTEGER width per strip, then converted back to a scale.
+    //
+    // Deriving the scale from exact fractional widths and rounding afterwards
+    // does not fit: each strip rounds half up, so n strips can overrun the room
+    // allowed by up to n/2 px, the column gets clamped to what was allowed, and
+    // the row grows a horizontal scrollbar - which also costs the strips ~15 px
+    // of height, in exactly the regime where the EQ's floor is binding. Fixing
+    // the per-strip pixel count first makes the total fit by construction.
+    int perStrip = kBaseWidth;
+    const int capped = static_cast<int>(kBaseWidth * (requestedScale > kMaxWidthScale
+                                                           ? kMaxWidthScale
+                                                           : requestedScale) + 0.5);
+    if (capped > perStrip) {
+        perStrip = capped;
     }
     if (sendCount > 0 && allowed > 0) {
         const int spacings = kSendSpacing * (sendCount - 1);
-        const double natural = static_cast<double>(sendCount) * kBaseWidth;
+        const int fits = (allowed - spacings) / sendCount;
         // Never below natural: past that the answer is to scroll the row, which
         // it already does, not to shrink the strips into illegibility.
-        const double fits = (allowed - spacings) / natural;
-        if (fits < scale) {
-            scale = fits < 1.0 ? 1.0 : fits;
+        if (fits < perStrip) {
+            perStrip = fits < kBaseWidth ? kBaseWidth : fits;
         }
     }
+    const double scale = static_cast<double>(perStrip) / kBaseWidth;
 
     const int stripsWidth =
-        sendCount > 0
-            ? sendCount * static_cast<int>(kBaseWidth * scale + 0.5) + kSendSpacing * (sendCount - 1)
-            : 0;
+        sendCount > 0 ? sendCount * perStrip + kSendSpacing * (sendCount - 1) : 0;
     int width = stripsWidth > headerWidth ? stripsWidth : headerWidth;
     if (allowed > 0 && width > allowed) {
         width = allowed;

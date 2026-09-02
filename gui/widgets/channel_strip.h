@@ -93,11 +93,14 @@ signals:
     void linkDragStarted();
     void linkDragMoved(const QPoint& globalPos);
     void linkDragFinished(const QPoint& globalPos);
+    // The link drag was abandoned rather than dropped - no position, no link.
+    void linkDragCancelled();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
     void changeEvent(QEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
@@ -119,6 +122,7 @@ private:
         QRect link;
     };
 
+    void cancelGesture();
     void recomputeLayout();
     QRect meterRectFor(int memberIndex) const;
     double gainDb() const;
