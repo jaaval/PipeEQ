@@ -86,10 +86,18 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
     // ---- the mixer row, along the bottom ----
     stripRack_ = new StripRack(state_, central);
     connect(stripRack_, &StripRack::selectionChanged, this, &MainWindow::onRackSelectionChanged);
-    connect(stripRack_, &StripRack::positionClicked, this, [this](const QString& stripId) {
-        selectStrip(stripId);
-        detailStack_->setCurrentIndex(0);
-    });
+    // The position badge selects its strip and nothing more - the same as
+    // clicking the strip body.
+    //
+    // It used to force the mixer page as well, so that the position control in
+    // the detail panel was on screen. But the badge is the most label-like part
+    // of a strip and the most natural "select this channel" target on it, so
+    // from the EQ page that closed the editor - which is not what clicking
+    // another output while editing an EQ should do. Selecting is enough,
+    // because the editor follows the selection: it switches to that channel's
+    // curve and stays where it is.
+    connect(stripRack_, &StripRack::positionClicked, this,
+            &MainWindow::onRackSelectionChanged);
     connect(stripRack_, &StripRack::collapsedDevicesChanged, this, [this] { saveSession(); });
     // The two rows of faders keep the same width. Driven by a signal rather
     // than read during applyDetailSizing, because the order in which the rack
