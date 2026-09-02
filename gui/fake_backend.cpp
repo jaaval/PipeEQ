@@ -385,6 +385,38 @@ void FakeBackend::splitEq(Output& output, const std::vector<uint32_t>& members) 
     Q_UNUSED(members);
 }
 
+bool FakeBackend::setOutputDisplayName(const QString& outputId, const QString& displayName) {
+    Output* output = findOutput(outputId);
+    if (!output) {
+        return false;
+    }
+    output->displayName = displayName.isEmpty() ? output->deviceName : displayName;
+    emit outputChanged(outputId);
+    return true;
+}
+
+bool FakeBackend::setChannelDisplayName(const QString& outputId, uint32_t channelIndex,
+                                         const QString& displayName) {
+    Channel* channel = findChannel(outputId, channelIndex);
+    if (!channel) {
+        return false;
+    }
+    channel->displayName = displayName;
+    emit outputChanged(outputId);
+    return true;
+}
+
+bool FakeBackend::setInputDisplayName(const QString& inputId, const QString& displayName) {
+    for (InputRow& input : inputs_) {
+        if (input.id == inputId) {
+            input.displayName = displayName;
+            emit inputsChanged();
+            return true;
+        }
+    }
+    return false;
+}
+
 QString FakeBackend::createLinkGroup(const QString& outputId, const QVector<uint32_t>& channels,
                                       const QString& displayName) {
     Output* output = findOutput(outputId);

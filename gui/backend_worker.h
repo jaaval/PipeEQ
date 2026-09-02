@@ -45,6 +45,10 @@ public slots:
     void removeOutput(const QString& outputId);
     void addInput(const QString& displayName);
     void removeInput(const QString& inputId);
+    void setOutputDisplayName(const QString& outputId, const QString& displayName);
+    void setChannelDisplayName(const QString& outputId, uint32_t channelIndex,
+                                const QString& displayName);
+    void setInputDisplayName(const QString& inputId, const QString& displayName);
     void createLinkGroup(const QString& outputId, const QVector<uint32_t>& channels);
     void removeLinkGroup(const QString& outputId, const QString& groupId);
     void setLinkGroupChannels(const QString& outputId, const QString& groupId,

@@ -4,6 +4,7 @@
 
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPushButton>
 #include <QFontMetrics>
 #include <QScrollBar>
 #include <QVBoxLayout>
@@ -294,6 +295,15 @@ void StripRack::connectStrip(ChannelStrip* strip) {
     });
 }
 
+void StripRack::setCollapsedDevices(const QStringList& nodeNames) {
+    collapsedDevices_ = QSet<QString>(nodeNames.begin(), nodeNames.end());
+    rebuild();
+}
+
+QStringList StripRack::collapsedDevices() const {
+    return QStringList(collapsedDevices_.begin(), collapsedDevices_.end());
+}
+
 void StripRack::rebuild() {
     const theme::Tokens tokens = theme::tokens();
     const QVector<StripCluster> clusters = buildClusters();
@@ -349,6 +359,30 @@ void StripRack::rebuild() {
             QString("color: %1;").arg(first.connected ? accent.name() : tokens.textDisabled.name()));
         blockLayout->addWidget(header);
 
+        // An absent device collapses to a single placeholder that says why, so a
+        // rack with several unplugged interfaces isn't mostly ghost strips. The
+        // strips are only hidden, never forgotten: the configuration is still
+        // there and still editable once expanded.
+        const bool collapsible = !first.connected;
+        const bool collapsed = collapsible && collapsedDevices_.contains(first.deviceName);
+
+        if (collapsible) {
+            auto* toggle = new QPushButton(collapsed ? "Show channels" : "Hide", deviceBlock);
+            toggle->setToolTip(collapsed
+                                    ? "This device isn't present. Its channels are hidden."
+                                    : "Hide this absent device's channels.");
+            connect(toggle, &QPushButton::clicked, this, [this, name = first.deviceName] {
+                if (collapsedDevices_.contains(name)) {
+                    collapsedDevices_.remove(name);
+                } else {
+                    collapsedDevices_.insert(name);
+                }
+                rebuild();
+                emit collapsedDevicesChanged();
+            });
+            blockLayout->addWidget(toggle);
+        }
+
         auto* stripsRow = new QWidget(deviceBlock);
         deviceStripsLayout = new QHBoxLayout(stripsRow);
         deviceStripsLayout->setContentsMargins(0, 0, 0, 0);
@@ -356,6 +390,7 @@ void StripRack::rebuild() {
         // Trailing stretch, so strips keep their natural width instead of
         // expanding to fill whatever the block happens to be.
         deviceStripsLayout->addStretch(1);
+        stripsRow->setVisible(!collapsed);
         blockLayout->addWidget(stripsRow, 1);
 
         // Insert before the trailing stretch.
@@ -382,7 +417,8 @@ void StripRack::rebuild() {
                             std::any_of(cluster.members.begin(), cluster.members.end(),
                                         [&](const StripRow& m) { return m.id == selectedStripId_; }));
         deviceStripsLayout->insertWidget(deviceStripsLayout->count() - 1, strip);
-        strip->show();
+        strip->setVisible(deviceStripsLayout->parentWidget()->isVisibleTo(content_) ||
+                           !collapsedDevices_.contains(cluster.deviceName));
         kept.insert(cluster.key, strip);
     }
 

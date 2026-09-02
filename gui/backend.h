@@ -133,6 +133,16 @@ public:
     // nothing. The daemon refuses past this.
     virtual int maxSendsPerOutput() const = 0;
 
+    // ---- names ----
+    //
+    // User-facing labels only; ids never change. A channel's label is what the
+    // strip shows in place of its bare position, which is how a rack of eight
+    // AUX channels becomes readable.
+    virtual bool setOutputDisplayName(const QString& outputId, const QString& displayName) = 0;
+    virtual bool setChannelDisplayName(const QString& outputId, uint32_t channelIndex,
+                                        const QString& displayName) = 0;
+    virtual bool setInputDisplayName(const QString& inputId, const QString& displayName) = 0;
+
     // ---- link groups ----
     //
     // Linking is what makes channels share a fader, a mute, their sends AND

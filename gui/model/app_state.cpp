@@ -455,6 +455,23 @@ void AppState::removeInput(const QString& inputId) {
                                Q_ARG(QString, inputId));
 }
 
+void AppState::renameOutput(const QString& outputId, const QString& displayName) {
+    QMetaObject::invokeMethod(worker_, "setOutputDisplayName", Qt::QueuedConnection,
+                               Q_ARG(QString, outputId), Q_ARG(QString, displayName));
+}
+
+void AppState::renameChannel(const QString& outputId, uint32_t channelIndex,
+                              const QString& displayName) {
+    QMetaObject::invokeMethod(worker_, "setChannelDisplayName", Qt::QueuedConnection,
+                               Q_ARG(QString, outputId), Q_ARG(uint32_t, channelIndex),
+                               Q_ARG(QString, displayName));
+}
+
+void AppState::renameInput(const QString& inputId, const QString& displayName) {
+    QMetaObject::invokeMethod(worker_, "setInputDisplayName", Qt::QueuedConnection,
+                               Q_ARG(QString, inputId), Q_ARG(QString, displayName));
+}
+
 void AppState::linkChannels(const QString& outputId, const QVector<uint32_t>& channelIndices) {
     QMetaObject::invokeMethod(worker_, "createLinkGroup", Qt::QueuedConnection,
                                Q_ARG(QString, outputId), Q_ARG(QVector<uint32_t>, channelIndices));

@@ -12,7 +12,9 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QMessageBox>
+#include <QCloseEvent>
 #include <QPushButton>
+#include <QSettings>
 #include <QShortcut>
 #include <QStackedWidget>
 #include <QStatusBar>
@@ -28,6 +30,11 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
     : QMainWindow(parent), state_(state) {
     setWindowTitle("PipeEQ");
     resize(1280, 740);
+    // Below this the layout cannot honour its own constraints: the rack has a
+    // fixed height and the detail area has minimums, so Qt has to violate one
+    // of them and it picks the rack - which simply vanishes. Found by rendering
+    // at 2x scaling, where a 1900x1100 window is only 950x550 logical pixels.
+    setMinimumSize(940, 660);
 
     auto* central = new QWidget(this);
     auto* rootLayout = new QVBoxLayout(central);
@@ -83,6 +90,7 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
         selectStrip(stripId);
         detailStack_->setCurrentIndex(0);
     });
+    connect(stripRack_, &StripRack::collapsedDevicesChanged, this, [this] { saveSession(); });
     connect(stripRack_, &StripRack::statusMessage, this, [this](const QString& message) {
         // The rack's own progress and refusals go to the status bar; an empty
         // message means "nothing to say", so fall back to the selection.
@@ -112,6 +120,7 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
     connect(state_, &AppState::sendsUpdated, this,
             [this](const QString&) { detailPanel_->refreshValues(); });
     connect(state_, &AppState::errorReported, this, &MainWindow::onErrorReported);
+    connect(detailStack_, &QStackedWidget::currentChanged, this, [this](int) { saveSession(); });
     connect(state_, &AppState::availabilityChanged, this, [this](bool) { updateStripStatus(); });
     // One timer in the store drives every meter; each rack decides which of its
     // widgets are actually visible and worth repainting.
@@ -121,6 +130,44 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
     });
 
     onTopologyChanged();
+    restoreSession();
+}
+
+// Window geometry, which page was open, which channel was selected and which
+// absent devices were collapsed. Small conveniences, but their absence is felt
+// every single launch - and none of it belongs in the daemon's config, because
+// it is per-machine UI state rather than anything about the audio.
+void MainWindow::restoreSession() {
+    QSettings settings;
+    settings.beginGroup("mainWindow");
+    const QByteArray geometry = settings.value("geometry").toByteArray();
+    if (!geometry.isEmpty()) {
+        restoreGeometry(geometry);
+    }
+    stripRack_->setCollapsedDevices(settings.value("collapsedDevices").toStringList());
+    const QString selection = settings.value("selectedStrip").toString();
+    settings.endGroup();
+
+    // The selection can only be restored once the first snapshot has arrived,
+    // and only if that channel still exists - a device may have been unplugged
+    // or its profile changed since.
+    if (!selection.isEmpty()) {
+        pendingSelection_ = selection;
+    }
+}
+
+void MainWindow::saveSession() const {
+    QSettings settings;
+    settings.beginGroup("mainWindow");
+    settings.setValue("geometry", saveGeometry());
+    settings.setValue("selectedStrip", currentStripId_);
+    settings.setValue("collapsedDevices", stripRack_->collapsedDevices());
+    settings.endGroup();
+}
+
+void MainWindow::closeEvent(QCloseEvent* event) {
+    saveSession();
+    QMainWindow::closeEvent(event);
 }
 
 void MainWindow::applyDetailSizing(int pageIndex) {
@@ -180,7 +227,19 @@ void MainWindow::refreshDevices() {
 void MainWindow::refreshStrips() {
     // Only called when the store says the strip SET moved. The rack reuses its
     // widgets where it can, so a rebuild can't drop a drag in progress.
-    const QString previousSelection = currentStripId_;
+    QString previousSelection = currentStripId_;
+
+    // A selection restored from the last session applies as soon as that
+    // channel actually exists, and is dropped if it never appears.
+    if (!pendingSelection_.isEmpty()) {
+        if (findStrip(pendingSelection_)) {
+            previousSelection = pendingSelection_;
+            pendingSelection_.clear();
+        } else if (!state_->strips().isEmpty()) {
+            pendingSelection_.clear();
+        }
+    }
+
     stripRack_->rebuild();
 
     if (findStrip(previousSelection)) {

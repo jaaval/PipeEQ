@@ -3,6 +3,7 @@
 #include <QHash>
 #include <QScrollArea>
 #include <QSet>
+#include <QStringList>
 #include <QVector>
 #include <QWidget>
 
@@ -40,6 +41,11 @@ public:
     void setSelectedStripId(const QString& stripId);
     QString selectedStripId() const { return selectedStripId_; }
 
+    // Collapse state is remembered per PipeWire node.name, so a rack with three
+    // unplugged interfaces isn't mostly placeholders every time the app starts.
+    void setCollapsedDevices(const QStringList& nodeNames);
+    QStringList collapsedDevices() const;
+
     // Links whatever is currently marked. Also reachable with the L key.
     void linkMarkedChannels();
     void clearLinkMarks();
@@ -50,6 +56,7 @@ signals:
     void positionClicked(const QString& stripId);
     // Human-readable progress or refusal, for the status bar.
     void statusMessage(const QString& message);
+    void collapsedDevicesChanged();
 
 private:
     // The strips that belong together in one widget: a link group, or one lone
@@ -79,6 +86,7 @@ private:
     // Cluster keys marked for linking. Keyed by cluster rather than strip id so
     // a rebuild doesn't lose the marks.
     QSet<QString> linkMarks_;
+    QSet<QString> collapsedDevices_;
     ChannelStrip* linkDragSource_ = nullptr;
     ChannelStrip* linkDropTarget_ = nullptr;
 };

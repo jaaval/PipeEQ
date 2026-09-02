@@ -11,6 +11,10 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     app.setApplicationName("PipeEQ");
     app.setApplicationDisplayName("PipeEQ");
+    // QSettings derives its file path from these; without them it writes to an
+    // "Unknown Organization" directory.
+    app.setOrganizationName("PipeEQ");
+    app.setOrganizationDomain("pipeeq.local");
 
     QCommandLineParser parser;
     parser.setApplicationDescription("Per-channel audio routing, volume and EQ for PipeWire.");

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -63,6 +64,11 @@ public:
     QVector<SendEntry> getOutputSends(const QString& outputId) override;
     int maxSendsPerOutput() const override { return kMaxSendsPerOutput; }
 
+    bool setOutputDisplayName(const QString& outputId, const QString& displayName) override;
+    bool setChannelDisplayName(const QString& outputId, uint32_t channelIndex,
+                                const QString& displayName) override;
+    bool setInputDisplayName(const QString& inputId, const QString& displayName) override;
+
     QString createLinkGroup(const QString& outputId, const QVector<uint32_t>& channels,
                              const QString& displayName) override;
     bool removeLinkGroup(const QString& outputId, const QString& groupId) override;
@@ -72,6 +78,8 @@ public:
     void setMeteringEnabled(bool enabled) override;
 
 private:
+    bool callSetter(const char* method, const std::string& a, const std::string& b);
+
     // Mirrors the daemon's kMaxInputs. Not discoverable over the bus today; if
     // that limit ever becomes configurable it needs to be reported instead of
     // duplicated here.

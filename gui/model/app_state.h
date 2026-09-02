@@ -91,6 +91,11 @@ public:
     void addInput(const QString& displayName);
     void removeInput(const QString& inputId);
 
+    // ---- names ----
+    void renameOutput(const QString& outputId, const QString& displayName);
+    void renameChannel(const QString& outputId, uint32_t channelIndex, const QString& displayName);
+    void renameInput(const QString& inputId, const QString& displayName);
+
     // ---- linking ----
     void linkChannels(const QString& outputId, const QVector<uint32_t>& channelIndices);
     void unlinkGroup(const QString& outputId, const QString& groupId);

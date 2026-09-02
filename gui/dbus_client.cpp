@@ -27,6 +27,24 @@ QString stripId(const QString& outputId, uint32_t channelIndex) {
 
 } // namespace
 
+// The two-string setters are otherwise four copies of the same try/catch.
+bool DbusClient::callSetter(const char* method, const std::string& a, const std::string& b) {
+    if (!proxy_) {
+        return false;
+    }
+    try {
+        bool ok = false;
+        proxy_->callMethod(method)
+            .onInterface(eqcore::dbus::kInterfaceName)
+            .withArguments(a, b)
+            .storeResultsTo(ok);
+        return ok;
+    } catch (const sdbus::Error& e) {
+        qWarning("pipeeq-gui: %s failed: %s", method, e.what());
+        return false;
+    }
+}
+
 DbusClient::DbusClient(QObject* parent) : Backend(parent) {
     // Explicit session-bus connection rather than sdbus-c++'s ambiguous
     // "default bus" resolution, which (like plain `busctl` with no --user flag)
@@ -93,6 +111,34 @@ DbusClient::DbusClient(QObject* parent) : Backend(parent) {
             };
             emit metersReceived(convert(outputs), convert(inputs));
         });
+}
+
+bool DbusClient::setOutputDisplayName(const QString& outputId, const QString& displayName) {
+    return callSetter(eqcore::dbus::kMethodSetOutputDisplayName, outputId.toStdString(),
+                       displayName.toStdString());
+}
+
+bool DbusClient::setChannelDisplayName(const QString& outputId, uint32_t channelIndex,
+                                        const QString& displayName) {
+    if (!proxy_) {
+        return false;
+    }
+    try {
+        bool ok = false;
+        proxy_->callMethod(eqcore::dbus::kMethodSetChannelDisplayName)
+            .onInterface(eqcore::dbus::kInterfaceName)
+            .withArguments(outputId.toStdString(), channelIndex, displayName.toStdString())
+            .storeResultsTo(ok);
+        return ok;
+    } catch (const sdbus::Error& e) {
+        qWarning("pipeeq-gui: SetChannelDisplayName failed: %s", e.what());
+        return false;
+    }
+}
+
+bool DbusClient::setInputDisplayName(const QString& inputId, const QString& displayName) {
+    return callSetter(eqcore::dbus::kMethodSetInputDisplayName, inputId.toStdString(),
+                       displayName.toStdString());
 }
 
 QString DbusClient::createLinkGroup(const QString& outputId, const QVector<uint32_t>& channels,

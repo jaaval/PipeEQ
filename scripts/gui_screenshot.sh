@@ -14,6 +14,7 @@ GEOMETRY="${GEOMETRY:-1100x700}"
 ONSCREEN=0
 DEMO=0
 OPEN_EQ=0
+SCALE="${SCALE:-1}"
 SEED_CONFIG="${SEED_CONFIG:-}"
 
 for arg in "$@"; do
@@ -21,9 +22,19 @@ for arg in "$@"; do
         --onscreen) ONSCREEN=1 ;;
         --demo) DEMO=1 ;;
         --open-eq) OPEN_EQ=1 ;;
+        --hidpi) SCALE=2 ;;
         *) echo "unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
+
+# The X screen is sized in DEVICE pixels but --geometry is in LOGICAL pixels, so
+# at 2x scaling they are not the same number. Passing the device size as the
+# logical size asks for a window twice the screen and silently pushes the bottom
+# of the layout off-screen - which looks exactly like a broken layout.
+LOGICAL_GEOMETRY="$GEOMETRY"
+if [[ "$SCALE" != "1" ]]; then
+    LOGICAL_GEOMETRY="$(( ${GEOMETRY%x*} / SCALE ))x$(( ${GEOMETRY#*x} / SCALE ))"
+fi
 
 GUI_ARGS=""
 [[ "$DEMO" -eq 1 ]] && GUI_ARGS="$GUI_ARGS --demo"
@@ -90,7 +101,8 @@ else
     # exits (`| head`) sends SIGPIPE and kills the GUI mid-capture.
     xvfb-run -a --server-args="-screen 0 ${GEOMETRY}x24" bash -c "
         env -u WAYLAND_DISPLAY QT_QPA_PLATFORM=xcb QT_QPA_PLATFORMTHEME= \
-            '$BUILD_DIR/gui/pipeeq-gui' $GUI_ARGS --geometry '$GEOMETRY' \
+            QT_SCALE_FACTOR='$SCALE' \
+            '$BUILD_DIR/gui/pipeeq-gui' $GUI_ARGS --geometry '$LOGICAL_GEOMETRY' \
             > '$WORKDIR/gui-inner.log' 2>&1 &
         GUI=\$!
         sleep 4

@@ -5,7 +5,6 @@
 
 #include "backend.h"
 
-class QComboBox;
 class QHBoxLayout;
 class QLabel;
 class QPushButton;
@@ -50,13 +49,17 @@ private:
     void connectSendStrip(SendStrip* strip);
     void updateHeader();
     void updateEqPreview();
+    void choosePosition();
+    void renameChannel();
+    void renameOutput();
 
     AppState* state_;
     QString stripId_;
 
     QLabel* title_ = nullptr;
     QLabel* subtitle_ = nullptr;
-    QComboBox* positionCombo_ = nullptr;
+    QPushButton* positionButton_ = nullptr;
+    QPushButton* renameButton_ = nullptr;
     QPushButton* autoConnectButton_ = nullptr;
 
     QScrollArea* sendArea_ = nullptr;

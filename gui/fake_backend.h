@@ -58,6 +58,11 @@ public:
     QVector<SendEntry> getOutputSends(const QString& outputId) override;
     int maxSendsPerOutput() const override { return 8; }
 
+    bool setOutputDisplayName(const QString& outputId, const QString& displayName) override;
+    bool setChannelDisplayName(const QString& outputId, uint32_t channelIndex,
+                                const QString& displayName) override;
+    bool setInputDisplayName(const QString& inputId, const QString& displayName) override;
+
     QString createLinkGroup(const QString& outputId, const QVector<uint32_t>& channels,
                              const QString& displayName) override;
     bool removeLinkGroup(const QString& outputId, const QString& groupId) override;

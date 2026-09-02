@@ -2,8 +2,9 @@
 
 #include <algorithm>
 
-#include <QComboBox>
 #include <QFrame>
+#include <QInputDialog>
+#include <QMenu>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
@@ -11,6 +12,7 @@
 #include <QVBoxLayout>
 
 #include "eq_preview.h"
+#include "position_selector.h"
 #include "model/app_state.h"
 #include "send_strip.h"
 #include "theme/theme.h"
@@ -37,22 +39,22 @@ DetailPanel::DetailPanel(AppState* state, QWidget* parent) : QWidget(parent), st
     subtitle_->setStyleSheet(QString("color: %1;").arg(tokens.textDim.name()));
     headerRow->addWidget(subtitle_, 1);
 
+    // A menu rather than two buttons: renaming is infrequent, and "which of
+    // these two things am I renaming" is clearer as an explicit choice than as
+    // two similarly-labelled buttons.
+    renameButton_ = new QPushButton("Rename...", this);
+    auto* renameMenu = new QMenu(renameButton_);
+    renameMenu->addAction("Rename channel...", this, &DetailPanel::renameChannel);
+    renameMenu->addAction("Rename output...", this, &DetailPanel::renameOutput);
+    renameButton_->setMenu(renameMenu);
+    headerRow->addWidget(renameButton_);
+
     headerRow->addWidget(new QLabel("Position:", this));
-    positionCombo_ = new QComboBox(this);
-    connect(positionCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
-        if (suppressSignals_ || index < 0) {
-            return;
-        }
-        const StripRow* strip = state_->findStrip(stripId_);
-        if (!strip) {
-            return;
-        }
-        const QString position = positionCombo_->itemData(index).toString();
-        if (position != strip->position) {
-            state_->setChannelPosition(strip->outputId, strip->channelIndex, position);
-        }
-    });
-    headerRow->addWidget(positionCombo_);
+    positionButton_ = new QPushButton(this);
+    positionButton_->setMinimumWidth(70);
+    positionButton_->setToolTip("Which hardware position this channel drives.");
+    connect(positionButton_, &QPushButton::clicked, this, &DetailPanel::choosePosition);
+    headerRow->addWidget(positionButton_);
 
     autoConnectButton_ = new QPushButton("Auto-connect", this);
     autoConnectButton_->setCheckable(true);
@@ -136,13 +138,15 @@ void DetailPanel::updateHeader() {
     const StripRow* strip = state_->findStrip(stripId_);
     const bool have = strip != nullptr;
 
-    positionCombo_->setEnabled(have);
+    positionButton_->setEnabled(have);
+    renameButton_->setEnabled(have);
     autoConnectButton_->setEnabled(have);
     addSinkButton_->setEnabled(have);
 
     if (!have) {
         title_->setText(state_->isAvailable() ? "No channel selected" : "Not connected");
         subtitle_->clear();
+        positionButton_->setText("-");
         return;
     }
 
@@ -162,26 +166,95 @@ void DetailPanel::updateHeader() {
 
     suppressSignals_ = true;
     autoConnectButton_->setChecked(strip->autoConnect);
-
-    positionCombo_->clear();
-    QVector<QString> options;
-    if (const DeviceRow* device = state_->findDevice(strip->deviceName)) {
-        options = device->positions;
-    }
-    // Always offer the channel's CURRENT position even if the device no longer
-    // advertises it, so a profile change doesn't silently snap it elsewhere the
-    // moment this is rebuilt.
-    if (!strip->position.isEmpty() && !options.contains(strip->position)) {
-        options.push_back(strip->position);
-    }
-    for (const QString& position : options) {
-        positionCombo_->addItem(position, position);
-    }
-    const int current = positionCombo_->findData(strip->position);
-    if (current >= 0) {
-        positionCombo_->setCurrentIndex(current);
-    }
+    positionButton_->setText(strip->position.isEmpty() ? QStringLiteral("-") : strip->position);
     suppressSignals_ = false;
+}
+
+void DetailPanel::choosePosition() {
+    const StripRow* strip = state_->findStrip(stripId_);
+    if (!strip) {
+        return;
+    }
+    const QString outputId = strip->outputId;
+    const uint32_t channelIndex = strip->channelIndex;
+    const QString currentPosition = strip->position;
+
+    // Offer everything the device advertises, plus the channel's current
+    // position even if the device stopped advertising it - otherwise a profile
+    // change makes the position it is actually set to unrepresentable.
+    QVector<QString> devicePositions;
+    if (const DeviceRow* device = state_->findDevice(strip->deviceName)) {
+        devicePositions = device->positions;
+    }
+    QVector<QString> offered = devicePositions;
+    if (!currentPosition.isEmpty() && !offered.contains(currentPosition)) {
+        offered.push_back(currentPosition);
+    }
+
+    QVector<PositionSelector::Entry> entries;
+    for (const QString& position : offered) {
+        PositionSelector::Entry entry;
+        entry.position = position;
+        entry.availableOnDevice = devicePositions.contains(position);
+        for (const StripRow& sibling : state_->strips()) {
+            if (sibling.outputId == outputId && sibling.channelIndex != channelIndex &&
+                sibling.position == position) {
+                entry.takenBy = sibling.channelName.isEmpty() ? sibling.position
+                                                              : sibling.channelName;
+            }
+        }
+        entries.push_back(entry);
+    }
+
+    const QString chosen = PositionSelector::choose(this, entries, currentPosition);
+    if (chosen.isEmpty() || chosen == currentPosition) {
+        return;
+    }
+
+    // If a sibling already drives it, SWAP rather than leaving two channels
+    // claiming the same position - which would silently make one of them
+    // unreachable by the mix planner.
+    for (const StripRow& sibling : state_->strips()) {
+        if (sibling.outputId == outputId && sibling.channelIndex != channelIndex &&
+            sibling.position == chosen) {
+            state_->setChannelPosition(outputId, sibling.channelIndex, currentPosition);
+            break;
+        }
+    }
+    state_->setChannelPosition(outputId, channelIndex, chosen);
+}
+
+void DetailPanel::renameChannel() {
+    const StripRow* strip = state_->findStrip(stripId_);
+    if (!strip) {
+        return;
+    }
+    const QString outputId = strip->outputId;
+    const uint32_t channelIndex = strip->channelIndex;
+
+    bool accepted = false;
+    const QString name = QInputDialog::getText(
+        this, "Rename channel",
+        QString("Label for %1 (leave empty to show just the position):").arg(strip->position),
+        QLineEdit::Normal, strip->channelName, &accepted);
+    if (!accepted) {
+        return;
+    }
+    state_->renameChannel(outputId, channelIndex, name.trimmed());
+}
+
+void DetailPanel::renameOutput() {
+    const StripRow* strip = state_->findStrip(stripId_);
+    if (!strip) {
+        return;
+    }
+    bool accepted = false;
+    const QString name =
+        QInputDialog::getText(this, "Rename output", "Name for this output:", QLineEdit::Normal,
+                               strip->outputName, &accepted);
+    if (accepted && !name.trimmed().isEmpty()) {
+        state_->renameOutput(strip->outputId, name.trimmed());
+    }
 }
 
 void DetailPanel::connectSendStrip(SendStrip* strip) {

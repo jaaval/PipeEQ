@@ -35,6 +35,9 @@ public:
     // a scripted check can reach that page without simulating input.
     void showEqEditor();
 
+protected:
+    void closeEvent(QCloseEvent* event) override;
+
 private slots:
     void onAddOutputClicked();
     void onRemoveOutputClicked();
@@ -50,6 +53,8 @@ private slots:
 
 private:
     void applyDetailSizing(int pageIndex);
+    void restoreSession();
+    void saveSession() const;
     void selectStrip(const QString& stripId);
     void loadStripDetail(const StripRow& strip);
     // Refreshes only what can change without the strip set changing (labels,
@@ -75,6 +80,8 @@ private:
     QLabel* statusLabel_ = nullptr;
 
     QString currentStripId_;
+    // A selection restored from QSettings, applied once that channel exists.
+    QString pendingSelection_;
     // Still needed for programmatic widget updates - a QSignalBlocker in all
     // but name. It no longer has anything to do with reconciling daemon values;
     // that is EditGuard's job in the store now.

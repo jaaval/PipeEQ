@@ -157,6 +157,31 @@ void BackendWorker::removeInput(const QString& inputId) {
     requestSnapshot();
 }
 
+void BackendWorker::setOutputDisplayName(const QString& outputId, const QString& displayName) {
+    if (!backend_) {
+        return;
+    }
+    backend_->setOutputDisplayName(outputId, displayName);
+    requestSnapshot();
+}
+
+void BackendWorker::setChannelDisplayName(const QString& outputId, uint32_t channelIndex,
+                                           const QString& displayName) {
+    if (!backend_) {
+        return;
+    }
+    backend_->setChannelDisplayName(outputId, channelIndex, displayName);
+    requestSnapshot();
+}
+
+void BackendWorker::setInputDisplayName(const QString& inputId, const QString& displayName) {
+    if (!backend_) {
+        return;
+    }
+    backend_->setInputDisplayName(inputId, displayName);
+    requestSnapshot();
+}
+
 void BackendWorker::createLinkGroup(const QString& outputId, const QVector<uint32_t>& channels) {
     if (!backend_) {
         return;
