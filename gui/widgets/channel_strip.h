@@ -48,6 +48,19 @@ public:
     void setLinkDropTarget(bool target);
     void setAccentColor(const QColor& color) { accent_ = color; update(); }
 
+    // Width at scale 1, and the scale itself. The rack widens its strips to use
+    // spare room; see StripRack::applyWidthScale.
+    int naturalWidth() const;
+    void setWidthScale(double scale);
+    static double maxWidthScale();
+
+    // Where the fader and the meters are. Exposed because which of the two a
+    // press lands in is now behaviour in its own right - the meter is a
+    // readout and does not accept a press - and that is worth asserting
+    // against the real rectangles rather than against guessed coordinates.
+    QRect faderRect() const;
+    QRect meterAreaRect() const;
+
     QSize sizeHint() const override;
 
     // The height below which a strip clips its own content. Static so a
@@ -127,6 +140,11 @@ private:
     bool linkDropTarget_ = false;
     bool draggingLink_ = false;
     bool draggingFader_ = false;
+    // A press on the fader of a strip that was not selected: it selects, and
+    // only becomes a gain edit if the pointer then moves.
+    bool faderArmed_ = false;
+    QPoint faderPressPos_;
+    double widthScale_ = 1.0;
     // Local value while dragging, so the strip follows the pointer instead of
     // the round trip. The store's edit guard is what stops a snapshot
     // overwriting it.

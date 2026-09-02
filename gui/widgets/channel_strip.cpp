@@ -27,6 +27,15 @@ constexpr int kFaderWidth = 24;
 // adjustment near unity.
 constexpr double kFineDragFactor = 0.25;
 
+// How far the pointer must travel before a press on an unselected strip's fader
+// counts as a drag rather than a click.
+constexpr int kDragThresholdPx = 3;
+
+// The most a strip widens by on a roomy window. Some, but not much: past this
+// the meters are all a strip has to show for the space, and a mixer with eight
+// enormous channels reads worse than one with eight legible ones.
+constexpr double kMaxWidthScale = 2.0;
+
 QString formatDb(double db) {
     if (taper::isSilent(db)) {
         return QStringLiteral("-∞");
@@ -152,9 +161,36 @@ bool ChannelStrip::isDriven() const {
     return !strips_.isEmpty() && strips_.front().connected && strips_.front().driven;
 }
 
-QSize ChannelStrip::sizeHint() const {
+QRect ChannelStrip::faderRect() const {
+    return layout_.fader;
+}
+
+QRect ChannelStrip::meterAreaRect() const {
+    return layout_.meterArea;
+}
+
+int ChannelStrip::naturalWidth() const {
     const int members = std::max(1, static_cast<int>(strips_.size()));
-    return QSize(kStripWidthSingle + (members - 1) * kStripExtraPerMember, 250);
+    return kStripWidthSingle + (members - 1) * kStripExtraPerMember;
+}
+
+double ChannelStrip::maxWidthScale() {
+    return kMaxWidthScale;
+}
+
+void ChannelStrip::setWidthScale(double scale) {
+    const double clamped = std::clamp(scale, 1.0, kMaxWidthScale);
+    if (clamped == widthScale_) {
+        return;
+    }
+    widthScale_ = clamped;
+    updateGeometry();
+    recomputeLayout();
+    update();
+}
+
+QSize ChannelStrip::sizeHint() const {
+    return QSize(static_cast<int>(std::lround(naturalWidth() * widthScale_)), 250);
 }
 
 QSize ChannelStrip::minimumSizeHint() const {
@@ -165,6 +201,11 @@ void ChannelStrip::recomputeLayout() {
     const int pad = 4;
     int y = pad;
     const int innerWidth = width() - 2 * pad;
+    // The fader widens with the strip rather than staying 24 px in a strip
+    // twice that wide: the proportions are what make it read as a fader, and a
+    // wider grip is easier to hit - which matters more now that the meter
+    // beside it no longer accepts a press.
+    const int faderWidth = static_cast<int>(std::lround(kFaderWidth * widthScale_));
 
     layout_.positionBadge = QRect(pad, y, innerWidth, kRowHeight);
     y += kRowHeight + 2;
@@ -179,9 +220,9 @@ void ChannelStrip::recomputeLayout() {
     // one meter slice per group member to its right.
     const int bottomBlock = kRowHeight * 2 + 8;
     const int middleHeight = std::max(40, height() - y - bottomBlock - pad);
-    layout_.fader = QRect(pad, y, kFaderWidth, middleHeight);
+    layout_.fader = QRect(pad, y, faderWidth, middleHeight);
     layout_.meterArea =
-        QRect(layout_.fader.right() + 3, y, std::max(kMeterWidth, innerWidth - kFaderWidth - 3),
+        QRect(layout_.fader.right() + 3, y, std::max(kMeterWidth, innerWidth - faderWidth - 3),
                middleHeight);
     y += middleHeight + 3;
 
@@ -444,21 +485,51 @@ void ChannelStrip::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
+    // Captured BEFORE the emit: selection is applied synchronously, so asking
+    // afterwards always says yes and the first click on a strip would jump its
+    // fader - the very thing this distinction exists to prevent.
+    const bool wasSelected = selected_;
     emit selectRequested();
 
-    if (layout_.fader.contains(pos) || layout_.meterArea.contains(pos)) {
+    // The FADER only. The meter used to count as fader too, so clicking a
+    // strip's meter to select it moved the gain - which is most of the strip's
+    // area, and the meter is the one part of it that looks like a readout
+    // rather than a control.
+    if (!layout_.fader.contains(pos)) {
+        return;
+    }
+
+    faderPressPos_ = pos;
+    if (wasSelected) {
+        // Clicking the track of a strip you are already on jumps to that value,
+        // which is what mixer users expect.
         draggingFader_ = true;
         emit gainEditBegan();
-        // Clicking the track jumps to that value, which is what mixer users
-        // expect; the subsequent drag is then relative to the pointer.
         applyGainFromY(pos.y());
+        return;
     }
+    // First click on an unselected strip selects it and leaves the gain alone.
+    // A DRAG is unambiguous, though, so it still takes effect on this first
+    // touch - see mouseMoveEvent.
+    faderArmed_ = true;
 }
 
 void ChannelStrip::mouseMoveEvent(QMouseEvent* event) {
     if (draggingLink_) {
         emit linkDragMoved(event->globalPosition().toPoint());
         return;
+    }
+    if (faderArmed_) {
+        // Past the threshold this is a drag, not a click, and a drag says
+        // plainly what it means - so the fader takes it even though this strip
+        // was not selected when the press landed. The threshold is what keeps a
+        // click with a pixel of hand tremor from counting as one.
+        if ((event->pos() - faderPressPos_).manhattanLength() < kDragThresholdPx) {
+            return;
+        }
+        faderArmed_ = false;
+        draggingFader_ = true;
+        emit gainEditBegan();
     }
     if (!draggingFader_) {
         return;
@@ -487,6 +558,9 @@ void ChannelStrip::mouseReleaseEvent(QMouseEvent* event) {
         emit linkDragFinished(event->globalPosition().toPoint());
         return;
     }
+    // An armed press that never moved was a plain click: it selected the strip
+    // and that is all it should do.
+    faderArmed_ = false;
     if (!draggingFader_) {
         return;
     }

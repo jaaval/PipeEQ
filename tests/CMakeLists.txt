@@ -76,6 +76,21 @@ if(TARGET pipeeq-gui)
     target_link_libraries(test_knob PRIVATE pipeeq_test_support eqcore Qt6::Widgets)
     add_test(NAME test_knob COMMAND test_knob)
 
+    # Mouse behaviour of a mixer strip: which of the fader and the meter takes a
+    # press, and whether a press is a click or the start of a drag. None of that
+    # is visible in a screenshot, and it is the part of the UI most handled.
+    add_executable(test_channel_strip
+        test_channel_strip.cpp
+        ${CMAKE_SOURCE_DIR}/gui/widgets/channel_strip.cpp
+        ${CMAKE_SOURCE_DIR}/gui/widgets/fader_taper.cpp
+        ${CMAKE_SOURCE_DIR}/gui/model/level_meters.cpp
+        ${CMAKE_SOURCE_DIR}/gui/theme/theme.cpp
+        ${CMAKE_SOURCE_DIR}/gui/theme/paint_helpers.cpp
+    )
+    target_include_directories(test_channel_strip PRIVATE ${CMAKE_SOURCE_DIR}/gui)
+    target_link_libraries(test_channel_strip PRIVATE pipeeq_test_support eqcore Qt6::Widgets)
+    add_test(NAME test_channel_strip COMMAND test_channel_strip)
+
     # Drives the store end-to-end against the demo backend, including the
     # cross-thread hand-off to the backend worker - the seam where a call can
     # silently do nothing while every component looks correct in isolation.

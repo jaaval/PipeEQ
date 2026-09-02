@@ -44,6 +44,37 @@ StripRack::StripRack(AppState* state, QWidget* parent) : QScrollArea(parent), st
 // content margins, 14 px, which silently pinned the rack to its smallest
 // allowed height on any window size. sizeHint() on our own widgets is safe
 // before show; layout minimums are not.
+// Widens the strips to take up spare horizontal room, up to the strip's own
+// cap.
+//
+// Content-aware rather than a function of the window width alone: a 16-channel
+// interface at a wide window has no slack to give away, and widening its strips
+// would only force a horizontal scrollbar. So the scale is whatever the actual
+// slack allows, which is 1.0 exactly when there is none.
+//
+// The natural width comes from naturalContentWidth_, accumulated in rebuild(),
+// for the same reason the height does: asking the content layout for its size
+// hint returns the bare margins - 12 px here - because a QWidgetItem
+// contributes nothing for a widget that has not been shown, and it stays that
+// way for these widgets even afterwards.
+void StripRack::applyWidthScale() {
+    if (stripWidgets_.isEmpty() || naturalContentWidth_ <= 0) {
+        return;
+    }
+    // Two pixels of headroom: landing exactly on the viewport width risks
+    // rounding a pixel over it and producing the scrollbar this is avoiding.
+    const double available = viewport()->width() - 2;
+    const double scale = available / naturalContentWidth_;
+    for (auto it = stripWidgets_.begin(); it != stripWidgets_.end(); ++it) {
+        it.value()->setWidthScale(scale);
+    }
+}
+
+void StripRack::resizeEvent(QResizeEvent* event) {
+    QScrollArea::resizeEvent(event);
+    applyWidthScale();
+}
+
 int StripRack::contentMinimumHeight() const {
     return chromeHeight_ + stripMinimumHeight();
 }
@@ -356,12 +387,34 @@ void StripRack::rebuild() {
     // carries an extra collapse button, so the chrome is not a constant.
     int chrome = 0;
 
+    // Natural width, accumulated the same way. A block is a column: its width is
+    // whichever of its header, its collapse button and its strips row is
+    // widest.
+    int naturalWidth = contentLayout_->contentsMargins().left() +
+                        contentLayout_->contentsMargins().right();
+    int blockStripsWidth = 0;
+    int blockHeaderWidth = 0;
+    int blocksSoFar = 0;
+    const auto finishBlock = [&] {
+        if (blocksSoFar == 0) {
+            return;
+        }
+        naturalWidth += std::max(blockStripsWidth, blockHeaderWidth) + 12; // block margins
+        if (blocksSoFar > 1) {
+            naturalWidth += contentLayout_->spacing();
+        }
+    };
+
     QHash<QString, ChannelStrip*> kept;
     QString currentDevice;
     QWidget* deviceBlock = nullptr;
     QHBoxLayout* deviceStripsLayout = nullptr;
 
     const auto startDeviceBlock = [&](const StripCluster& cluster) {
+        finishBlock();
+        ++blocksSoFar;
+        blockStripsWidth = 0;
+        blockHeaderWidth = 0;
         currentDevice = cluster.deviceName;
         const StripRow& first = cluster.members.front();
 
@@ -398,6 +451,7 @@ void StripRack::rebuild() {
         blockLayout->addWidget(header);
         // Block margins (4 + 4) + the header + the spacing before the strips.
         int blockChrome = 8 + header->sizeHint().height() + blockLayout->spacing();
+        blockHeaderWidth = header->sizeHint().width();
 
         // An absent device collapses to a single placeholder that says why, so a
         // rack with several unplugged interfaces isn't mostly ghost strips. The
@@ -422,6 +476,7 @@ void StripRack::rebuild() {
             });
             blockLayout->addWidget(toggle);
             blockChrome += toggle->sizeHint().height() + blockLayout->spacing();
+            blockHeaderWidth = std::max(blockHeaderWidth, toggle->sizeHint().width());
         }
 
         auto* stripsRow = new QWidget(deviceBlock);
@@ -459,6 +514,7 @@ void StripRack::rebuild() {
         strip->setSelected(cluster.members.front().id == selectedStripId_ ||
                             std::any_of(cluster.members.begin(), cluster.members.end(),
                                         [&](const StripRow& m) { return m.id == selectedStripId_; }));
+        blockStripsWidth += strip->naturalWidth() + (blockStripsWidth > 0 ? 4 : 0);
         deviceStripsLayout->insertWidget(deviceStripsLayout->count() - 1, strip);
         strip->setVisible(deviceStripsLayout->parentWidget()->isVisibleTo(content_) ||
                            !collapsedDevices_.contains(cluster.deviceName));
@@ -485,6 +541,10 @@ void StripRack::rebuild() {
     // horizontal scrollbar otherwise.
     chromeHeight_ = contentLayout_->contentsMargins().top() +
                      contentLayout_->contentsMargins().bottom() + chrome + 2;
+    finishBlock();
+    naturalContentWidth_ = naturalWidth;
+    // The strip set changed, so the slack has too.
+    applyWidthScale();
 
     // Keep a valid selection so the detail area is never left showing nothing.
     if (!selectedStripId_.isEmpty() && !state_->findStrip(selectedStripId_)) {

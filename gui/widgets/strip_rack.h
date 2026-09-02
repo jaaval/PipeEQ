@@ -65,6 +65,9 @@ signals:
     void statusMessage(const QString& message);
     void collapsedDevicesChanged();
 
+protected:
+    void resizeEvent(QResizeEvent* event) override;
+
 private:
     // The strips that belong together in one widget: a link group, or one lone
     // channel.
@@ -76,6 +79,10 @@ private:
 
     QVector<StripCluster> buildClusters() const;
     int stripMinimumHeight() const;
+    // Widens the strips to use spare horizontal room. Content-aware: the scale
+    // is whatever the actual slack allows, so a rack with no slack keeps its
+    // strips at their natural width instead of forcing a scrollbar.
+    void applyWidthScale();
     void connectStrip(ChannelStrip* strip);
     ChannelStrip* stripAtGlobalPos(const QPoint& globalPos) const;
     void applyLinkMarks();
@@ -92,6 +99,9 @@ private:
     // Height the tallest device block adds around its strips row, plus the
     // content margins and the frame. Recomputed in rebuild().
     int chromeHeight_ = 26;
+    // Width the strips and their block chrome want at scale 1. Recomputed in
+    // rebuild().
+    int naturalContentWidth_ = 0;
     QVector<QWidget*> deviceBlocks_;
     QString selectedStripId_;
     // Cluster keys marked for linking. Keyed by cluster rather than strip id so
