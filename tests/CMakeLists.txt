@@ -63,6 +63,19 @@ if(TARGET pipeeq-gui)
     target_link_libraries(test_gui_model PRIVATE pipeeq_test_support eqcore Qt6::Widgets)
     add_test(NAME test_gui_model COMMAND test_gui_model)
 
+    # The EQ band knobs. Almost entirely taper arithmetic, which is invisible in
+    # a screenshot: a wrong logarithmic curve looks perfect and makes the bottom
+    # two octaves unreachable. Every gesture is a real QEvent sent to the
+    # widget, so no display is needed - it runs on the offscreen platform.
+    add_executable(test_knob
+        test_knob.cpp
+        ${CMAKE_SOURCE_DIR}/gui/widgets/knob.cpp
+        ${CMAKE_SOURCE_DIR}/gui/theme/theme.cpp
+    )
+    target_include_directories(test_knob PRIVATE ${CMAKE_SOURCE_DIR}/gui)
+    target_link_libraries(test_knob PRIVATE pipeeq_test_support eqcore Qt6::Widgets)
+    add_test(NAME test_knob COMMAND test_knob)
+
     # Drives the store end-to-end against the demo backend, including the
     # cross-thread hand-off to the backend worker - the seam where a call can
     # silently do nothing while every component looks correct in isolation.

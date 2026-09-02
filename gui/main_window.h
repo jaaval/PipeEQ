@@ -11,6 +11,7 @@ class QComboBox;
 class QLabel;
 class QPushButton;
 class QStackedWidget;
+class QVBoxLayout;
 
 namespace pipeeq {
 
@@ -57,6 +58,7 @@ private slots:
 
 private:
     void applyDetailSizing(int pageIndex);
+    void applyMinimumHeight(int rackFloor);
     void restoreSession();
     void saveSession() const;
     void selectStrip(const QString& stripId);
@@ -74,6 +76,7 @@ private:
 
     StripRack* stripRack_ = nullptr;
     DetailPanel* detailPanel_ = nullptr;
+    QVBoxLayout* rootLayout_ = nullptr;
     QStackedWidget* detailStack_ = nullptr;
     QComboBox* deviceCombo_ = nullptr;
     QPushButton* addButton_ = nullptr;

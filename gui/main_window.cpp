@@ -30,17 +30,13 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
     : QMainWindow(parent), state_(state) {
     setWindowTitle("PipeEQ");
     resize(1280, 740);
-    // A floor, not the real constraint: the layout's own minimum governs above
-    // this. It was 660 when the rack's height was a constant Qt had to violate
-    // to fit, and violating it made the rack vanish outright. The rack now
-    // holds a hard minimum of its own, so this only has to be low enough not to
-    // exclude a display the window would otherwise fit - a 1920x1200 screen at
-    // 2x scaling is 600 logical pixels tall, and 660 ruled it out.
-    setMinimumSize(940, 600);
+    // Width only. The minimum HEIGHT is derived from the content instead, in
+    // applyDetailSizing - see the note there.
+    setMinimumWidth(940);
 
     auto* central = new QWidget(this);
-    auto* rootLayout = new QVBoxLayout(central);
-    rootLayout->setSpacing(8);
+    rootLayout_ = new QVBoxLayout(central);
+    rootLayout_->setSpacing(8);
 
     // ---- top bar: output management ----
     auto* topBar = new QHBoxLayout;
@@ -54,7 +50,7 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
     topBar->addWidget(addButton_);
     topBar->addWidget(removeButton_);
     topBar->addStretch(1);
-    rootLayout->addLayout(topBar);
+    rootLayout_->addLayout(topBar);
 
     // ---- detail area ----
     //
@@ -76,7 +72,7 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
             [this] { detailStack_->setCurrentIndex(0); });
     detailStack_->addWidget(eqEditor_);
 
-    rootLayout->addWidget(detailStack_, 1);
+    rootLayout_->addWidget(detailStack_, 1);
 
     // The two pages want very different amounts of room: the mixer view should
     // leave the strip rack as the dominant surface, while editing an EQ curve
@@ -102,7 +98,7 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
             statusLabel_->setText(message);
         }
     });
-    rootLayout->addWidget(stripRack_);
+    rootLayout_->addWidget(stripRack_);
 
     setCentralWidget(central);
     applyDetailSizing(0);
@@ -110,8 +106,18 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
     // Window-level shortcuts, so linking works wherever focus happens to be.
     auto* linkShortcut = new QShortcut(QKeySequence(Qt::Key_L), this);
     connect(linkShortcut, &QShortcut::activated, stripRack_, &StripRack::linkMarkedChannels);
-    auto* clearShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), this);
-    connect(clearShortcut, &QShortcut::activated, stripRack_, &StripRack::clearLinkMarks);
+    // Escape means "back out of what I'm in": the EQ editor first, then any
+    // pending link selection. Ordered rather than split across two keys,
+    // because from the editor's point of view there is nothing else Escape
+    // could plausibly mean, and link marks are not visible from there anyway.
+    auto* escapeShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), this);
+    connect(escapeShortcut, &QShortcut::activated, this, [this] {
+        if (detailStack_->currentIndex() == 1) {
+            detailStack_->setCurrentIndex(0);
+            return;
+        }
+        stripRack_->clearLinkMarks();
+    });
 
     statusLabel_ = new QLabel(this);
     statusBar()->addWidget(statusLabel_);
@@ -210,11 +216,42 @@ void MainWindow::applyDetailSizing(int pageIndex) {
         rackHeight = std::clamp(height() * 44 / 100, floorHeight, floorHeight + 240);
     }
 
-    if (stripRack_->maximumHeight() == rackHeight && stripRack_->minimumHeight() == rackHeight) {
-        return; // nothing to do, and re-setting it would relayout on every resize
+    if (stripRack_->maximumHeight() != rackHeight || stripRack_->minimumHeight() != rackHeight) {
+        stripRack_->setMinimumHeight(rackHeight);
+        stripRack_->setMaximumHeight(rackHeight);
     }
-    stripRack_->setMinimumHeight(rackHeight);
-    stripRack_->setMaximumHeight(rackHeight);
+    applyMinimumHeight(floorHeight);
+}
+
+// The window's minimum height, derived rather than chosen.
+//
+// It cannot be left to Qt: giving the rack a definite height makes it a
+// constraint the root layout must satisfy, and an explicit minimum on a window
+// overrides the layout's own. So when the number here is too small, Qt has no
+// way to honour every constraint and resolves it by letting widgets OVERLAP -
+// which is what happened the moment the band controls grew knobs: at 600 px the
+// band ribbon was drawn on top of the EQ curve. A hardcoded number is wrong
+// again every time the content changes height, so it is measured.
+void MainWindow::applyMinimumHeight(int rackFloor) {
+    const QMargins margins = rootLayout_->contentsMargins();
+    // The detail stack reports the tallest of its pages, which is the EQ editor.
+    const int wanted = margins.top() + margins.bottom() + 2 * rootLayout_->spacing() +
+                        deviceCombo_->sizeHint().height() + rackFloor +
+                        detailStack_->minimumSizeHint().height() +
+                        statusBar()->sizeHint().height();
+    if (minimumHeight() != wanted) {
+        setMinimumHeight(wanted);
+    }
+    // And grow to it if we are already smaller. Setting the minimum is not
+    // enough on its own: it is published to the window manager as a hint, which
+    // constrains what the USER can drag the window to but does not resize a
+    // window that is already below it. Two ways to get there - a geometry
+    // restored from a session before the content grew, and the startup resize
+    // landing before the rack has been measured - and both showed as widgets
+    // drawn on top of each other.
+    if (height() < wanted) {
+        resize(width(), wanted);
+    }
 }
 
 void MainWindow::resizeEvent(QResizeEvent* event) {

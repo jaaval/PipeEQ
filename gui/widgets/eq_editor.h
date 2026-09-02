@@ -6,7 +6,7 @@
 #include "eq_band.h"
 
 class QCheckBox;
-class QDoubleSpinBox;
+
 class QHBoxLayout;
 class QLabel;
 class QPushButton;
@@ -14,6 +14,7 @@ class QPushButton;
 namespace pipeeq {
 
 class AppState;
+class KnobField;
 class EqCurveWidget;
 
 // The full EQ editor for one channel's curve.
@@ -62,9 +63,9 @@ private:
 
     QLabel* bandTitle_ = nullptr;
     QVector<QPushButton*> typeButtons_;
-    QDoubleSpinBox* freqSpin_ = nullptr;
-    QDoubleSpinBox* gainSpin_ = nullptr;
-    QDoubleSpinBox* qSpin_ = nullptr;
+    KnobField* freqKnob_ = nullptr;
+    KnobField* gainKnob_ = nullptr;
+    KnobField* qKnob_ = nullptr;
     QPushButton* removeBandButton_ = nullptr;
 
     bool suppressSignals_ = false;

@@ -19,6 +19,7 @@ add_executable(pipeeq-gui
     widgets/eq_editor.cpp
     widgets/eq_preview.cpp
     widgets/fader_taper.cpp
+    widgets/knob.cpp
     widgets/position_selector.cpp
     widgets/send_strip.cpp
     widgets/strip_rack.cpp

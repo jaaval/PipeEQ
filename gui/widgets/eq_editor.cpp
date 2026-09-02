@@ -5,7 +5,6 @@
 #include <QCheckBox>
 #include <QDialog>
 #include <QDialogButtonBox>
-#include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
@@ -15,6 +14,7 @@
 
 #include "app_config.h"
 #include "eq_curve_widget.h"
+#include "knob.h"
 #include "model/app_state.h"
 #include "theme/theme.h"
 
@@ -180,48 +180,65 @@ EqEditor::EqEditor(AppState* state, QWidget* parent) : QWidget(parent), state_(s
     }
 
     bandRow->addSpacing(10);
-    bandRow->addWidget(new QLabel("Freq", this));
-    freqSpin_ = new QDoubleSpinBox(this);
-    freqSpin_->setRange(20.0, 20000.0);
-    freqSpin_->setDecimals(1);
-    freqSpin_->setSuffix(" Hz");
-    freqSpin_->setMinimumWidth(110);
-    connect(freqSpin_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
-        if (suppressSignals_ || selected_ < 0 || selected_ >= bands_.size()) {
-            return;
-        }
-        bands_[selected_].freqHz = value;
-        pushSelectedBand();
-    });
-    bandRow->addWidget(freqSpin_);
 
-    bandRow->addWidget(new QLabel("Gain", this));
-    gainSpin_ = new QDoubleSpinBox(this);
-    gainSpin_->setRange(-24.0, 24.0);
-    gainSpin_->setDecimals(2);
-    gainSpin_->setSuffix(" dB");
-    connect(gainSpin_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
-        if (suppressSignals_ || selected_ < 0 || selected_ >= bands_.size()) {
-            return;
-        }
-        bands_[selected_].gainDb = value;
-        pushSelectedBand();
-    });
-    bandRow->addWidget(gainSpin_);
+    // A knob per parameter with its number underneath, rather than a spin box
+    // with arrows. The arrows were the weakest control here by some distance:
+    // frequency stepped by 1 Hz, so crossing the range took twenty thousand
+    // clicks, and the step was the same 1 Hz at 40 Hz as at 15 kHz.
+    //
+    // Every knob takes a vertical drag or the wheel; the field below it still
+    // takes a typed value, which is the one thing a knob is bad at.
+    const auto connectKnob = [this](KnobField* knob, double eqcore::EqBand::*member) {
+        connect(knob, &KnobField::valueEdited, this, [this, member](double value) {
+            if (suppressSignals_ || selected_ < 0 || selected_ >= bands_.size()) {
+                return;
+            }
+            bands_[selected_].*member = value;
+            pushSelectedBand();
+        });
+        // A drag is one gesture, so it holds off any remote value arriving
+        // mid-drag - the same guard the curve handles use.
+        connect(knob, &KnobField::editBegan, this, [this] {
+            if (const StripRow* strip = state_->findStrip(stripId_)) {
+                state_->beginEdit(EditKey{strip->id, Field::EqBand, selected_});
+            }
+        });
+        connect(knob, &KnobField::editFinished, this, [this] {
+            if (const StripRow* strip = state_->findStrip(stripId_)) {
+                state_->endEdit(EditKey{strip->id, Field::EqBand, selected_});
+            }
+        });
+    };
 
-    bandRow->addWidget(new QLabel("Q", this));
-    qSpin_ = new QDoubleSpinBox(this);
-    qSpin_->setRange(0.1, 10.0);
-    qSpin_->setDecimals(3);
-    qSpin_->setSingleStep(0.05);
-    connect(qSpin_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
-        if (suppressSignals_ || selected_ < 0 || selected_ >= bands_.size()) {
-            return;
-        }
-        bands_[selected_].q = value;
-        pushSelectedBand();
-    });
-    bandRow->addWidget(qSpin_);
+    freqKnob_ = new KnobField("Freq", this);
+    freqKnob_->setRange(20.0, 20000.0);
+    freqKnob_->setDecimals(1);
+    freqKnob_->setSuffix(" Hz");
+    // Frequency is perceived in ratios, so the knob is logarithmic: an octave
+    // occupies the same arc wherever it sits.
+    freqKnob_->setTaper(Knob::Taper::Logarithmic);
+    freqKnob_->setDefaultValue(1000.0);
+    connectKnob(freqKnob_, &eqcore::EqBand::freqHz);
+    bandRow->addWidget(freqKnob_);
+
+    gainKnob_ = new KnobField("Gain", this);
+    gainKnob_->setRange(-24.0, 24.0);
+    gainKnob_->setDecimals(2);
+    gainKnob_->setSuffix(" dB");
+    // Linear, and centred: the arc fills from 0 dB, so a cut and a boost are
+    // visibly opposite rather than both being "more arc".
+    gainKnob_->setDefaultValue(0.0);
+    connectKnob(gainKnob_, &eqcore::EqBand::gainDb);
+    bandRow->addWidget(gainKnob_);
+
+    qKnob_ = new KnobField("Q", this);
+    qKnob_->setRange(0.1, 10.0);
+    qKnob_->setDecimals(3);
+    qKnob_->setSingleStep(0.05);
+    qKnob_->setTaper(Knob::Taper::Logarithmic);
+    qKnob_->setDefaultValue(0.707);
+    connectKnob(qKnob_, &eqcore::EqBand::q);
+    bandRow->addWidget(qKnob_);
 
     bandRow->addStretch(1);
     removeBandButton_ = new QPushButton("Remove band", this);
@@ -331,9 +348,9 @@ void EqEditor::updateBandControls() {
     for (QPushButton* button : typeButtons_) {
         button->setEnabled(have);
     }
-    freqSpin_->setEnabled(have);
-    gainSpin_->setEnabled(have);
-    qSpin_->setEnabled(have);
+    freqKnob_->setEnabled(have);
+    gainKnob_->setEnabled(have);
+    qKnob_->setEnabled(have);
     removeBandButton_->setEnabled(have);
     copyButton_->setEnabled(!stripId_.isEmpty());
 
@@ -349,9 +366,9 @@ void EqEditor::updateBandControls() {
     for (int i = 0; i < typeButtons_.size(); ++i) {
         typeButtons_[i]->setChecked(static_cast<int>(band.type) == i);
     }
-    freqSpin_->setValue(band.freqHz);
-    gainSpin_->setValue(band.gainDb);
-    qSpin_->setValue(band.q);
+    freqKnob_->setValue(band.freqHz);
+    gainKnob_->setValue(band.gainDb);
+    qKnob_->setValue(band.q);
     suppressSignals_ = false;
 }
 
