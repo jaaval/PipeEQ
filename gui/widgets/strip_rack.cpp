@@ -35,6 +35,29 @@ StripRack::StripRack(AppState* state, QWidget* parent) : QScrollArea(parent), st
     setMinimumHeight(150);
 }
 
+// The chrome is accumulated in rebuild() rather than read back off the layout.
+//
+// Asking the content widget for its minimumSizeHint looks like the obvious way
+// to do this and does not work: QWidgetItem reports a zero minimum for a widget
+// that has not been shown, and the rack is first built during MainWindow's
+// constructor - before show(). Every such measurement came back as the bare
+// content margins, 14 px, which silently pinned the rack to its smallest
+// allowed height on any window size. sizeHint() on our own widgets is safe
+// before show; layout minimums are not.
+int StripRack::contentMinimumHeight() const {
+    return chromeHeight_ + stripMinimumHeight();
+}
+
+int StripRack::stripMinimumHeight() const {
+    int minimum = 0;
+    for (auto it = stripWidgets_.begin(); it != stripWidgets_.end(); ++it) {
+        minimum = std::max(minimum, it.value()->minimumSizeHint().height());
+    }
+    // No strips yet: fall back to what one would ask for, so the first
+    // measurement is still in the right neighbourhood.
+    return minimum > 0 ? minimum : ChannelStrip::intrinsicMinimumHeight();
+}
+
 QVector<StripRack::StripCluster> StripRack::buildClusters() const {
     // Group by (output, link group). An ungrouped channel is its own cluster.
     QVector<StripCluster> clusters;
@@ -118,6 +141,7 @@ void StripRack::toggleLinkMark(ChannelStrip* strip) {
         linkMarks_.insert(key);
     }
     applyLinkMarks();
+
     emit statusMessage(linkMarks_.isEmpty()
                             ? QString()
                             : QString("%1 channel(s) marked - press L or click a link badge to link "
@@ -183,6 +207,7 @@ bool StripRack::linkChannels(ChannelStrip* anchor, const QVector<ChannelStrip*>&
     state_->linkChannels(outputId, indices);
     linkMarks_.clear();
     applyLinkMarks();
+
     emit statusMessage(QString("Linked %1 and %2.").arg(leaderName, discarded.join(", ")));
     return true;
 }
@@ -210,6 +235,7 @@ void StripRack::linkMarkedChannels() {
 void StripRack::clearLinkMarks() {
     linkMarks_.clear();
     applyLinkMarks();
+
     emit statusMessage(QString());
 }
 
@@ -326,6 +352,10 @@ void StripRack::rebuild() {
     }
     deviceBlocks_.clear();
 
+    // Recomputed below from the blocks actually built: an absent device's block
+    // carries an extra collapse button, so the chrome is not a constant.
+    int chrome = 0;
+
     QHash<QString, ChannelStrip*> kept;
     QString currentDevice;
     QWidget* deviceBlock = nullptr;
@@ -366,6 +396,8 @@ void StripRack::rebuild() {
         header->setStyleSheet(
             QString("color: %1;").arg(first.connected ? accent.name() : tokens.textDisabled.name()));
         blockLayout->addWidget(header);
+        // Block margins (4 + 4) + the header + the spacing before the strips.
+        int blockChrome = 8 + header->sizeHint().height() + blockLayout->spacing();
 
         // An absent device collapses to a single placeholder that says why, so a
         // rack with several unplugged interfaces isn't mostly ghost strips. The
@@ -389,6 +421,7 @@ void StripRack::rebuild() {
                 emit collapsedDevicesChanged();
             });
             blockLayout->addWidget(toggle);
+            blockChrome += toggle->sizeHint().height() + blockLayout->spacing();
         }
 
         auto* stripsRow = new QWidget(deviceBlock);
@@ -400,6 +433,8 @@ void StripRack::rebuild() {
         deviceStripsLayout->addStretch(1);
         stripsRow->setVisible(!collapsed);
         blockLayout->addWidget(stripsRow, 1);
+
+        chrome = std::max(chrome, blockChrome);
 
         // Insert before the trailing stretch.
         contentLayout_->insertWidget(contentLayout_->count() - 1, deviceBlock);
@@ -444,6 +479,12 @@ void StripRack::rebuild() {
         }
     }
     applyLinkMarks();
+
+    // The content margins, the tallest block's own chrome, and a pixel row for
+    // the frame - a scroll area sized to exactly its content still shows a
+    // horizontal scrollbar otherwise.
+    chromeHeight_ = contentLayout_->contentsMargins().top() +
+                     contentLayout_->contentsMargins().bottom() + chrome + 2;
 
     // Keep a valid selection so the detail area is never left showing nothing.
     if (!selectedStripId_.isEmpty() && !state_->findStrip(selectedStripId_)) {

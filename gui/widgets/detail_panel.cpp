@@ -11,6 +11,7 @@
 #include <QScrollArea>
 #include <QVBoxLayout>
 
+#include "elided_label.h"
 #include "eq_preview.h"
 #include "position_selector.h"
 #include "model/app_state.h"
@@ -35,8 +36,11 @@ DetailPanel::DetailPanel(AppState* state, QWidget* parent) : QWidget(parent), st
     title_->setFont(titleFont);
     headerRow->addWidget(title_);
 
-    subtitle_ = new QLabel(this);
-    subtitle_->setStyleSheet(QString("color: %1;").arg(tokens.textDim.name()));
+    // Elided rather than a QLabel: this line carries the device node name plus
+    // any status note, which is easily wider than the window, and a QLabel
+    // would run underneath the buttons to its right rather than give way.
+    subtitle_ = new ElidedLabel(this);
+    subtitle_->setTextColor(tokens.textDim);
     headerRow->addWidget(subtitle_, 1);
 
     // A menu rather than two buttons: renaming is infrequent, and "which of
@@ -70,24 +74,36 @@ DetailPanel::DetailPanel(AppState* state, QWidget* parent) : QWidget(parent), st
     root->addLayout(headerRow);
 
     // ---- sends and EQ, side by side ----
+    //
+    // The sends column takes only the width its strips actually occupy and the
+    // EQ absorbs everything left over, rather than the two splitting the window
+    // by a fixed ratio. A proportional split looks right at one window size and
+    // at any larger one leaves the send strips huddled at the left of a mostly
+    // empty column, with the "Add sink" button stranded against the EQ.
     auto* bodyRow = new QHBoxLayout;
     bodyRow->setSpacing(10);
 
-    auto* sendColumn = new QVBoxLayout;
-    auto* sendHeader = new QHBoxLayout;
-    auto* sendTitle = new QLabel("SENDS INTO THIS CHANNEL", this);
+    sendsColumn_ = new QWidget(this);
+    auto* sendColumn = new QVBoxLayout(sendsColumn_);
+    sendColumn->setContentsMargins(0, 0, 0, 0);
+    sendColumn->setSpacing(6);
+
+    sendHeader_ = new QWidget(sendsColumn_);
+    auto* sendHeader = new QHBoxLayout(sendHeader_);
+    sendHeader->setContentsMargins(0, 0, 0, 0);
+    auto* sendTitle = new QLabel("SENDS INTO THIS CHANNEL", sendHeader_);
     sendTitle->setStyleSheet(QString("color: %1;").arg(tokens.textDim.name()));
     sendHeader->addWidget(sendTitle);
-    sendCountLabel_ = new QLabel(this);
+    sendCountLabel_ = new QLabel(sendHeader_);
     sendCountLabel_->setStyleSheet(QString("color: %1;").arg(tokens.textDim.name()));
     sendHeader->addWidget(sendCountLabel_);
     sendHeader->addStretch(1);
-    addSinkButton_ = new QPushButton("Add sink...", this);
+    addSinkButton_ = new QPushButton("Add sink...", sendHeader_);
     connect(addSinkButton_, &QPushButton::clicked, this, &DetailPanel::addInputRequested);
     sendHeader->addWidget(addSinkButton_);
-    sendColumn->addLayout(sendHeader);
+    sendColumn->addWidget(sendHeader_);
 
-    sendArea_ = new QScrollArea(this);
+    sendArea_ = new QScrollArea(sendsColumn_);
     sendArea_->setWidgetResizable(true);
     sendArea_->setFrameShape(QFrame::NoFrame);
     sendArea_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -97,29 +113,57 @@ DetailPanel::DetailPanel(AppState* state, QWidget* parent) : QWidget(parent), st
     sendLayout_->setSpacing(5);
     sendLayout_->addStretch(1);
     sendArea_->setWidget(sendContent);
-    // Both bounds matter. The maximum keeps the detail area compact, since the
-    // mixer row below is the primary surface; the minimum stops a layout with
-    // spare stretch elsewhere from squeezing the strips down to a clipped sliver
-    // of their content.
+    // The send strips grow with the panel, the same way the mixer strips grow
+    // with the window - but within reason, for the same reason: past this a
+    // fader is a tall thin sliver with its label stranded at the far end, and
+    // it is no easier to aim. The surplus height goes to the EQ curve beside
+    // it, which is the one thing here that genuinely reads better large.
     sendArea_->setMinimumHeight(190);
-    sendArea_->setMaximumHeight(240);
+    sendArea_->setMaximumHeight(400);
     sendColumn->addWidget(sendArea_, 1);
-    bodyRow->addLayout(sendColumn, 3);
+    // Keeps the header and strips at the TOP once the send area hits its height
+    // cap. Without it the column's own maximum height stops short of the row's,
+    // and a horizontal layout centres a widget that cannot fill - which floated
+    // the sends header into the middle of the panel, detached from its strips.
+    sendColumn->addStretch(0);
+    bodyRow->addWidget(sendsColumn_);
 
     auto* eqColumn = new QVBoxLayout;
+    eqColumn->setSpacing(6);
     auto* eqTitle = new QLabel("EQ", this);
     eqTitle->setStyleSheet(QString("color: %1;").arg(tokens.textDim.name()));
     eqColumn->addWidget(eqTitle);
     eqPreview_ = new EqPreview(this);
     eqPreview_->setMinimumHeight(160);
-    eqPreview_->setMaximumHeight(240);
     connect(eqPreview_, &EqPreview::activated, this,
             [this] { emit eqEditRequested(stripId_); });
     eqColumn->addWidget(eqPreview_, 1);
-    bodyRow->addLayout(eqColumn, 2);
+    bodyRow->addLayout(eqColumn, 1);
 
-    root->addLayout(bodyRow);
-    root->addStretch(1);
+    // The body takes the slack. It used to be followed by a stretch, which
+    // pinned sends and EQ to their minimum heights and turned every extra pixel
+    // of window height into a band of empty space above the mixer row.
+    root->addLayout(bodyRow, 1);
+}
+
+// The sends column is sized to its content so it leaves no gap, but it must not
+// be allowed to crowd the EQ out on a narrow window - hence the share cap. The
+// header row is a floor: "SENDS INTO THIS CHANNEL  N/M used  [Add sink...]" is
+// wider than one or two strips.
+void DetailPanel::updateSendsWidth() {
+    if (!sendsColumn_ || !sendArea_ || !sendArea_->widget()) {
+        return;
+    }
+    const int strips = sendArea_->widget()->sizeHint().width();
+    const int header = sendHeader_ ? sendHeader_->sizeHint().width() : 0;
+    const int wanted = std::max(strips, header);
+    const int share = std::max(320, width() * 3 / 5);
+    sendsColumn_->setMaximumWidth(std::min(wanted, share));
+}
+
+void DetailPanel::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    updateSendsWidth();
 }
 
 void DetailPanel::setSelection(const QString& stripId) {
@@ -316,6 +360,7 @@ void DetailPanel::rebuildSends() {
         }
     }
     sendStrips_ = kept;
+    updateSendsWidth();
     refreshValues();
 }
 

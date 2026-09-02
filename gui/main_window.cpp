@@ -30,11 +30,13 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
     : QMainWindow(parent), state_(state) {
     setWindowTitle("PipeEQ");
     resize(1280, 740);
-    // Below this the layout cannot honour its own constraints: the rack has a
-    // fixed height and the detail area has minimums, so Qt has to violate one
-    // of them and it picks the rack - which simply vanishes. Found by rendering
-    // at 2x scaling, where a 1900x1100 window is only 950x550 logical pixels.
-    setMinimumSize(940, 660);
+    // A floor, not the real constraint: the layout's own minimum governs above
+    // this. It was 660 when the rack's height was a constant Qt had to violate
+    // to fit, and violating it made the rack vanish outright. The rack now
+    // holds a hard minimum of its own, so this only has to be low enough not to
+    // exclude a display the window would otherwise fit - a 1920x1200 screen at
+    // 2x scaling is 600 logical pixels tall, and 660 ruled it out.
+    setMinimumSize(940, 600);
 
     auto* central = new QWidget(this);
     auto* rootLayout = new QVBoxLayout(central);
@@ -175,19 +177,61 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     QMainWindow::closeEvent(event);
 }
 
+// How the window's height is divided between the mixer row and the detail area
+// above it.
+//
+// The rack is given a definite height and the detail area absorbs the rest,
+// because a fader's travel should be a usable size rather than however much
+// room happens to be left over. But that height used to be a CONSTANT, which
+// meant every pixel of extra window height went to a detail area whose contents
+// were pinned to their minimums - so a tall window grew nothing but a band of
+// empty space between the two. It now scales with the window, within bounds.
 void MainWindow::applyDetailSizing(int pageIndex) {
-    // The rack gets a FIXED height and the detail area absorbs the slack, rather
-    // than the other way round. Letting the rack stretch made the faders
-    // absurdly tall on a big window, and a fader's travel should be a usable
-    // size rather than however much room happens to be left over.
     const bool editingEq = pageIndex == 1;
-    // Collapsing the rack rather than hiding it while editing: the selection
-    // stays visible, so it is obvious which channel's curve is on screen. The
-    // collapsed height still has to fit a strip's content - at 150 px the
-    // readout and the mute/link row were simply cut off.
-    const int rackHeight = editingEq ? 215 : 300;
+
+    // The floor is whatever the rack needs to show a strip completely, asked of
+    // the rack rather than assumed: it varies with the devices present, since an
+    // absent device's block carries an extra collapse button. The previous
+    // constant, 215 px, was too small once that button existed and quietly
+    // clipped the mute/link row off the bottom of every strip.
+    const int floorHeight = stripRack_->contentMinimumHeight();
+
+    int rackHeight = floorHeight;
+    if (!editingEq) {
+        // On the mixer page the rack is the primary surface, so it takes a share
+        // of the height. The ceiling is the "within reason" part: past roughly
+        // 240 px of extra travel a fader is just harder to aim, and the sends
+        // and EQ curve make better use of the room.
+        // The WINDOW's height, not the central widget's. In resizeEvent the
+        // central widget has not been laid out to the new size yet, so asking it
+        // returns the previous height - which on the way up from the default
+        // geometry is small enough that the clamp always chose the floor, and
+        // the rack never grew at all.
+        rackHeight = std::clamp(height() * 44 / 100, floorHeight, floorHeight + 240);
+    }
+
+    if (stripRack_->maximumHeight() == rackHeight && stripRack_->minimumHeight() == rackHeight) {
+        return; // nothing to do, and re-setting it would relayout on every resize
+    }
     stripRack_->setMinimumHeight(rackHeight);
     stripRack_->setMaximumHeight(rackHeight);
+}
+
+void MainWindow::resizeEvent(QResizeEvent* event) {
+    QMainWindow::resizeEvent(event);
+    applyDetailSizing(detailStack_->currentIndex());
+}
+
+// The first honest chance to measure the rack.
+//
+// A hidden widget contributes nothing to its layout's minimum size, and the
+// first snapshot arrives - and so the rack is first built - during the
+// constructor, before show(). Every measurement taken then reports the bare
+// content margins, which is how the rack came out pinned at 254 px on a
+// 1150 px window: the floor read as 14, so floor + 240 was the ceiling too.
+void MainWindow::showEvent(QShowEvent* event) {
+    QMainWindow::showEvent(event);
+    applyDetailSizing(detailStack_->currentIndex());
 }
 
 void MainWindow::showEqEditor() {
@@ -246,6 +290,9 @@ void MainWindow::refreshStrips() {
     }
 
     stripRack_->rebuild();
+    // The set of devices just changed, so the height the rack needs may have
+    // changed with it.
+    applyDetailSizing(detailStack_->currentIndex());
 
     if (findStrip(previousSelection)) {
         selectStrip(previousSelection);

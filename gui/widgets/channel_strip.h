@@ -49,6 +49,10 @@ public:
     void setAccentColor(const QColor& color) { accent_ = color; update(); }
 
     QSize sizeHint() const override;
+
+    // The height below which a strip clips its own content. Static so a
+    // container can size itself around a strip before any strip exists.
+    static int intrinsicMinimumHeight() { return 180; }
     QSize minimumSizeHint() const override;
 
     // Repaints only the meter area. The static parts - labels, badges, fader cap

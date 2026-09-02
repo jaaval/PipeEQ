@@ -13,6 +13,7 @@ class QScrollArea;
 namespace pipeeq {
 
 class AppState;
+class ElidedLabel;
 class EqPreview;
 class SendStrip;
 
@@ -41,12 +42,16 @@ public:
     void rebuildSends();
     void refreshMeters();
 
+protected:
+    void resizeEvent(QResizeEvent* event) override;
+
 signals:
     void eqEditRequested(const QString& stripId);
     void addInputRequested();
 
 private:
     void connectSendStrip(SendStrip* strip);
+    void updateSendsWidth();
     void updateHeader();
     void updateEqPreview();
     void choosePosition();
@@ -57,11 +62,13 @@ private:
     QString stripId_;
 
     QLabel* title_ = nullptr;
-    QLabel* subtitle_ = nullptr;
+    ElidedLabel* subtitle_ = nullptr;
     QPushButton* positionButton_ = nullptr;
     QPushButton* renameButton_ = nullptr;
     QPushButton* autoConnectButton_ = nullptr;
 
+    QWidget* sendsColumn_ = nullptr;
+    QWidget* sendHeader_ = nullptr;
     QScrollArea* sendArea_ = nullptr;
     QHBoxLayout* sendLayout_ = nullptr;
     QHash<QString, SendStrip*> sendStrips_;

@@ -158,7 +158,7 @@ QSize ChannelStrip::sizeHint() const {
 }
 
 QSize ChannelStrip::minimumSizeHint() const {
-    return QSize(sizeHint().width(), 180);
+    return QSize(sizeHint().width(), intrinsicMinimumHeight());
 }
 
 void ChannelStrip::recomputeLayout() {

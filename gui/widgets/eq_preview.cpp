@@ -29,10 +29,11 @@ EqPreview::EqPreview(QWidget* parent) : QWidget(parent) {
 
     curve_ = new EqCurveWidget(this);
     curve_->setPreviewMode(true);
-    // A PREVIEW: tall enough to read the shape of a curve, small enough that it
-    // doesn't crowd out the mixer row it sits above. The full editor is one
-    // click away and gets the whole detail area.
-    curve_->setMaximumHeight(190);
+    // Grows with the panel. It used to be capped at 190 px so it could not
+    // crowd out the mixer row, but the mixer row now has a height of its own
+    // that the preview cannot take, so the cap only served to strand the curve
+    // in the top corner of a large window.
+    curve_->setMinimumHeight(120);
     layout->addWidget(curve_, 1);
 
     setCursor(Qt::PointingHandCursor);

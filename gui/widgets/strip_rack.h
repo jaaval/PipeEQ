@@ -46,6 +46,13 @@ public:
     void setCollapsedDevices(const QStringList& nodeNames);
     QStringList collapsedDevices() const;
 
+    // The height at which every strip is fully visible: the tallest device
+    // block's chrome plus a strip's own minimum. Accounts for the device
+    // headers and the collapse buttons, which a hand-tuned constant does not -
+    // and which is how the EQ page ended up clipping the mute/link row off
+    // every strip once absent devices grew a collapse button.
+    int contentMinimumHeight() const;
+
     // Links whatever is currently marked. Also reachable with the L key.
     void linkMarkedChannels();
     void clearLinkMarks();
@@ -68,6 +75,7 @@ private:
     };
 
     QVector<StripCluster> buildClusters() const;
+    int stripMinimumHeight() const;
     void connectStrip(ChannelStrip* strip);
     ChannelStrip* stripAtGlobalPos(const QPoint& globalPos) const;
     void applyLinkMarks();
@@ -81,6 +89,9 @@ private:
     // Keyed by cluster key, so a rebuild reuses widgets rather than recreating
     // them.
     QHash<QString, ChannelStrip*> stripWidgets_;
+    // Height the tallest device block adds around its strips row, plus the
+    // content margins and the frame. Recomputed in rebuild().
+    int chromeHeight_ = 26;
     QVector<QWidget*> deviceBlocks_;
     QString selectedStripId_;
     // Cluster keys marked for linking. Keyed by cluster rather than strip id so
