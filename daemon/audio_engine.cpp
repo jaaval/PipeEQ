@@ -366,12 +366,27 @@ void AudioEngine::republishLocked(RouteEntry& entry) {
     if (positions.empty()) {
         positions = entry.live->requestedPositions();
     }
+
+    const eqcore::OutputConfig& desired = entry.desired;
+
+    // Routing uses the USER'S assigned position per channel, falling back to
+    // what the device advertises. This is the whole point of the position being
+    // control-plane metadata: the stream keeps the device's own layout (so the
+    // 1:1 port link holds) while the mix planner matches input channels against
+    // whatever the user says each physical channel actually drives. Building
+    // the plan from the stream layout instead made SetChannelPosition a no-op
+    // that returned true.
+    std::vector<std::string> routingPositions = positions;
+    for (std::size_t ch = 0; ch < routingPositions.size(); ++ch) {
+        if (ch < desired.channels.size() && !desired.channels[ch].position.empty()) {
+            routingPositions[ch] = desired.channels[ch].position;
+        }
+    }
     const uint32_t negotiatedRate = entry.live->negotiatedRateHz();
     const double sampleRateHz =
         negotiatedRate != 0 ? static_cast<double>(negotiatedRate) : static_cast<double>(kSampleRateHz);
 
     const std::size_t channelCount = std::min(positions.size(), kMaxOutputChannels);
-    const eqcore::OutputConfig& desired = entry.desired;
 
     auto snapshot = std::make_unique<OutputSnapshot>();
     snapshot->numChannels = static_cast<uint8_t>(channelCount);
@@ -413,7 +428,7 @@ void AudioEngine::republishLocked(RouteEntry& entry) {
     // Which inputs does any channel of this output actually send from? An input
     // absent from every channel's sends map gets no slot at all, so the RT
     // thread never reads its ring buffer.
-    const std::vector<uint32_t> outputPositionValues = mix::positionValues(positions);
+    const std::vector<uint32_t> outputPositionValues = mix::positionValues(routingPositions);
     std::size_t slotIndex = 0;
     for (const auto& input : inputs_) {
         if (slotIndex >= kMaxInputs) {
@@ -450,6 +465,7 @@ void AudioEngine::republishLocked(RouteEntry& entry) {
         InputMixSlot& slot = snapshot->inputs[slotIndex++];
         slot.active = true;
         slot.inputId = input->id();
+        slot.identity = input->identity();
         slot.buffer = input->ringBuffer();
         slot.inputChannels = static_cast<uint16_t>(input->numChannels());
         mix::buildOutputTaps(outputPositionValues, mix::positionValues(input->positions()), sends,
@@ -1010,18 +1026,23 @@ void AudioEngine::shareGroupEqLocked(RouteEntry& entry, const std::vector<uint32
     pruneUnreferencedEqLocked(entry);
 }
 
-// Unlinking gives each former member its own COPY of the shared curve.
+// Gives each named channel its OWN copy of whatever curve it currently shares.
 //
 // Without this, "unlink" would separate the faders but leave the channels still
 // sharing one EQ, so editing one would still change the other - which is not
 // what unlinking means.
+//
+// Every named channel gets a copy, including the lowest-indexed one. Skipping
+// one as a notional "leader" was wrong for partial regrouping: if the channel
+// being removed from a group happened to be the lowest-indexed member, it was
+// the one skipped, so it kept sharing the group's instance and editing it still
+// changed the channels it had just been separated from.
 void AudioEngine::splitGroupEqLocked(RouteEntry& entry, const std::vector<uint32_t>& members) {
-    if (members.size() < 2) {
+    if (members.empty()) {
         return;
     }
-    const std::size_t leader = *std::min_element(members.begin(), members.end());
     for (uint32_t index : members) {
-        if (index >= entry.desired.channels.size() || index == leader) {
+        if (index >= entry.desired.channels.size()) {
             continue;
         }
         eqcore::OutputChannelConfig& channel = entry.desired.channels[index];
@@ -1180,8 +1201,13 @@ bool AudioEngine::removeLinkGroup(const std::string& outputId, const std::string
     // stop moving together from now on. The shared EQ has to be split into
     // per-channel copies, though, or the channels would keep sharing one curve
     // and editing either would still change both.
-    const std::vector<uint32_t> members = it->channelIndices;
+    std::vector<uint32_t> members = it->channelIndices;
     groups.erase(it);
+    // One member can keep the original instance; the rest get copies. Which one
+    // keeps it is arbitrary, so use the lowest index for determinism.
+    if (!members.empty()) {
+        members.erase(std::min_element(members.begin(), members.end()));
+    }
     splitGroupEqLocked(*entry, members);
     republishLocked(*entry);
     return true;
@@ -1217,20 +1243,17 @@ bool AudioEngine::setLinkGroupChannels(const std::string& outputId, const std::s
 
     const std::vector<uint32_t> previousMembers = group->channelIndices;
     group->channelIndices = members;
-    // Anything dropped from the group gets its own copy of the curve; whatever
-    // remains shares the leader's.
+
+    // Every channel dropped from the group gets its own copy of the curve, so it
+    // is genuinely separated. Done before the remaining members re-share, since
+    // that reassigns the instance the copies are taken from.
     std::vector<uint32_t> removed;
     for (uint32_t index : previousMembers) {
         if (std::find(members.begin(), members.end(), index) == members.end()) {
             removed.push_back(index);
         }
     }
-    if (!removed.empty()) {
-        std::vector<uint32_t> splitSet = removed;
-        splitSet.push_back(*std::min_element(previousMembers.begin(), previousMembers.end()));
-        std::sort(splitSet.begin(), splitSet.end());
-        splitGroupEqLocked(*entry, splitSet);
-    }
+    splitGroupEqLocked(*entry, removed);
     adoptGroupLeaderLocked(*entry, members);
     shareGroupEqLocked(*entry, members);
     republishLocked(*entry);

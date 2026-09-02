@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include <QSet>
+
 #include <nlohmann/json.hpp>
 
 #include "app_config.h"
@@ -89,6 +91,9 @@ FakeBackend::FakeBackend(QObject* parent) : Backend(parent) {
         scarlett.channels.push_back(std::move(channel));
     }
     scarlett.channels[0].groupId = scarlett.channels[1].groupId = "group-1";
+    // One channel the device's current profile no longer offers, so the
+    // connected-but-not-driven state is visible somewhere in the demo.
+    scarlett.channels[3].retired = true;
     outputs_.push_back(std::move(scarlett));
 
     // An absent device, so the "waiting" presentation is always on screen
@@ -171,7 +176,11 @@ std::vector<StripRow> FakeBackend::listStrips() {
             strip.muted = channel.muted;
             strip.bandCount = static_cast<uint32_t>(channel.bands.size());
             strip.connected = output.connected;
-            strip.driven = output.connected;
+            // Per channel, as the daemon reports it: a channel the device's
+            // current profile doesn't offer is connected-but-not-driven. The
+            // demo topology marks the retired channels so the "CH N/A"
+            // presentation is actually reachable here.
+            strip.driven = output.connected && !channel.retired;
             strip.autoConnect = output.autoConnect;
             strip.groupId = channel.groupId;
             result.push_back(std::move(strip));
@@ -282,24 +291,36 @@ bool FakeBackend::setChannelPosition(const QString& outputId, uint32_t channelIn
     return true;
 }
 
+// EQ follows the LINK GROUP, exactly as the daemon does: linked channels share
+// one curve. Editing only the addressed channel meant that in --demo, linking a
+// pair and editing the curve left the partner untouched - so the editor's
+// "shared with ... (linked)" note was simply false against the fake, and UI
+// developed against it would have been wrong against the daemon.
 bool FakeBackend::setChannelEqBandCount(const QString& outputId, uint32_t channelIndex,
                                          uint32_t count) {
-    Channel* channel = findChannel(outputId, channelIndex);
-    if (!channel) {
+    const std::vector<Channel*> members = linkedChannels(outputId, channelIndex);
+    if (members.empty()) {
         return false;
     }
-    channel->bands.resize(std::min<std::size_t>(count, eqcore::kMaxBands));
+    for (Channel* channel : members) {
+        channel->bands.resize(std::min<std::size_t>(count, eqcore::kMaxBands));
+    }
     emit outputChanged(outputId);
     return true;
 }
 
 bool FakeBackend::setChannelEqBand(const QString& outputId, uint32_t channelIndex, uint32_t index,
                                     const QString& type, double freqHz, double gainDb, double q) {
-    Channel* channel = findChannel(outputId, channelIndex);
-    if (!channel || index >= channel->bands.size()) {
+    const std::vector<Channel*> members = linkedChannels(outputId, channelIndex);
+    if (members.empty() || index >= members.front()->bands.size()) {
         return false;
     }
-    channel->bands[index] = eqcore::EqBand{filterTypeFromString(type), freqHz, gainDb, q};
+    const eqcore::EqBand band{filterTypeFromString(type), freqHz, gainDb, q};
+    for (Channel* channel : members) {
+        if (index < channel->bands.size()) {
+            channel->bands[index] = band;
+        }
+    }
     emit outputChanged(outputId);
     return true;
 }
@@ -331,6 +352,22 @@ bool FakeBackend::setSend(const QString& outputId, uint32_t channelIndex, const 
     const std::vector<Channel*> members = linkedChannels(outputId, channelIndex);
     if (members.empty()) {
         return false;
+    }
+
+    // The daemon bounds the DISTINCT inputs one output can send from, and
+    // refuses past it. The fake has to refuse too, or the UI's "N/8 used" and
+    // its disabled switch cannot be exercised in demo mode.
+    Output* output = findOutput(outputId);
+    if (output) {
+        QSet<QString> routed;
+        for (const Channel& channel : output->channels) {
+            for (const auto& [id, level] : channel.sendsDb) {
+                routed.insert(id);
+            }
+        }
+        if (!routed.contains(inputId) && routed.size() >= maxSendsPerOutput()) {
+            return false;
+        }
     }
     for (Channel* channel : members) {
         channel->sendsDb[inputId] = gainDb;

@@ -5,8 +5,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <atomic>
+#include <chrono>
 #include <limits>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include <spa/param/audio/raw.h>
@@ -21,6 +24,16 @@
 namespace {
 
 using namespace pipeeq;
+
+// A tiny stopwatch, so this file needs no Qt.
+struct QElapsedTimerLike {
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    long elapsedMs() const {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - start)
+            .count();
+    }
+};
 
 constexpr uint32_t kRate = 48000;
 
@@ -451,6 +464,77 @@ void testSnapshotSwapPreservesRampState() {
     CHECK_NEAR(std::fabs(dst[0]), 1.0, 0.01); // no fade-in from zero
 }
 
+// ------------------------------------------- concurrent snapshot publication --
+
+// The snapshot retire scheme is the most dangerous code in the project: a
+// use-after-free on PipeWire's realtime thread. Until this existed NO test ran
+// publish() and process() from two threads, so replacing the whole retire list
+// with a bare `delete` passed every suite and both race detectors.
+//
+// Under -DPIPEEQ_SANITIZE=thread or =address this is the check that catches it.
+// Without a sanitizer it still exercises the interleaving and will usually
+// crash or produce non-finite output if a live snapshot is freed.
+void testConcurrentPublishAndProcess() {
+    OutputProcessor processor(kRate);
+    auto buffer = bufferWithConstants({0.5f, 0.5f});
+    processor.publish(makeSnapshot({"FL", "FR"}, buffer, {"FL", "FR"}));
+
+    std::atomic<bool> stop{false};
+    std::atomic<long> blocks{0};
+    std::atomic<bool> sawNonFinite{false};
+
+    // Stands in for PipeWire's RT thread.
+    std::thread rt([&] {
+        std::vector<float> dst(256 * 2, 0.0f);
+        while (!stop.load(std::memory_order_relaxed)) {
+            processor.process(dst.data(), 256, 2);
+            for (float sample : dst) {
+                if (!std::isfinite(sample)) {
+                    sawNonFinite.store(true, std::memory_order_relaxed);
+                }
+            }
+            blocks.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+
+    // Stands in for the control thread under a fader drag.
+    const int windowMs = pipeeq::test::concurrencyMs(300);
+    QElapsedTimerLike timer;
+    while (timer.elapsedMs() < windowMs) {
+        processor.publish(
+            makeSnapshot({"FL", "FR"}, buffer, {"FL", "FR"}, -static_cast<double>(timer.elapsedMs() % 20)));
+    }
+
+    stop.store(true, std::memory_order_relaxed);
+    rt.join();
+
+    CHECK(blocks.load() > 0);
+    CHECK(!sawNonFinite.load());
+    // Everything retired during the run must be reclaimable now that the RT
+    // thread has stopped and one more publish has drained the list.
+    processor.publish(makeSnapshot({"FL", "FR"}, buffer, {"FL", "FR"}));
+    CHECK(processor.retiredSnapshotCount() <= 2);
+}
+
+// A publish while the stream is NOT running must never free the live snapshot:
+// the generation cannot advance, so nothing can be proven safe to reclaim.
+void testPublishWithoutProcessingRetainsSnapshots() {
+    OutputProcessor processor(kRate);
+    auto buffer = bufferWithConstants({0.5f, 0.5f});
+    for (int i = 0; i < 12; ++i) {
+        processor.publish(makeSnapshot({"FL", "FR"}, buffer, {"FL", "FR"}));
+    }
+    // Nothing has processed, so none of them can be released yet.
+    CHECK(processor.retiredSnapshotCount() >= 10);
+
+    // Once blocks run again they drain.
+    std::vector<float> dst(128 * 2, 0.0f);
+    processor.process(dst.data(), 128, 2);
+    processor.process(dst.data(), 128, 2);
+    processor.publish(makeSnapshot({"FL", "FR"}, buffer, {"FL", "FR"}));
+    CHECK(processor.retiredSnapshotCount() <= 2);
+}
+
 } // namespace
 
 int main() {
@@ -477,6 +561,8 @@ int main() {
     RUN(testFrameCountAboveScratchIsClamped);
 
     RUN(testRetiredSnapshotsDrain);
+    RUN(testConcurrentPublishAndProcess);
+    RUN(testPublishWithoutProcessingRetainsSnapshots);
     RUN(testSnapshotSwapPreservesRampState);
 
     return pipeeq::test::summary("output_processor");

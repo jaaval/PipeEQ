@@ -158,6 +158,7 @@ void to_json(nlohmann::json& j, const EqInstanceConfig& e) {
 void to_json(nlohmann::json& j, const OutputChannelConfig& c) {
     j = nlohmann::json{
         {"position", c.position},
+        {"device_position", c.devicePosition},
         {"display_name", c.displayName},
         {"gain_db", c.gainDb},
         {"muted", c.muted},
@@ -254,6 +255,7 @@ std::optional<OutputChannelConfig> parseChannel(const nlohmann::json& j,
     }
     OutputChannelConfig channel;
     channel.position = readOr<std::string>(j, "position", "");
+    channel.devicePosition = readOr<std::string>(j, "device_position", "");
     channel.displayName = readOr<std::string>(j, "display_name", "");
     channel.gainDb = readOr(j, "gain_db", 0.0);
     channel.muted = readOr(j, "muted", false);

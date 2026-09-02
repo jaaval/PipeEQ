@@ -114,6 +114,10 @@ signals:
     // topologyChanged so a refresh doesn't destroy widgets under the cursor.
     void stripsUpdated();
     void channelDetailUpdated(const QString& outputId, uint32_t channelIndex);
+    // One channel's value changed locally, from an optimistic update. Separate
+    // from stripsUpdated so a drag doesn't force a full-rack refresh per mouse
+    // event.
+    void channelValueChanged(const QString& outputId, uint32_t channelIndex);
     void sendsUpdated(const QString& outputId);
     void availabilityChanged(bool available);
     void errorReported(const QString& message);

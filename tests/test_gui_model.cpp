@@ -13,6 +13,8 @@
 #include "model/edit_guard.h"
 #include "model/level_meters.h"
 #include "model/write_coalescer.h"
+#include <QSet>
+
 #include "fake_backend.h"
 #include "widgets/fader_taper.h"
 
@@ -578,6 +580,72 @@ void testDemoLinkSharesTheCurve() {
     CHECK(lfeBandsAfter == fcBands);
 }
 
+// Editing a linked channel's curve must change its partner, in the fake exactly
+// as in the daemon. The fake used to edit only the addressed channel, so
+// --demo silently disagreed with the real thing about the one semantic this
+// branch is built around - and the editor's "shared with ... (linked)" note was
+// false there.
+void testDemoEditingLinkedCurveChangesPartner() {
+    FakeBackend backend;
+    const QString outputId = "output-1";
+    const int fl = channelIndexOf(backend, outputId, "FL");
+    const int fr = channelIndexOf(backend, outputId, "FR");
+    if (fl < 0 || fr < 0) {
+        return;
+    }
+    // FL+FR are seeded linked.
+    CHECK(!stripFor(backend, outputId, static_cast<uint32_t>(fl)).groupId.isEmpty());
+
+    backend.setChannelEqBandCount(outputId, static_cast<uint32_t>(fl), 1);
+    backend.setChannelEqBand(outputId, static_cast<uint32_t>(fl), 0, "peaking", 777.0, -5.5, 1.3);
+
+    const auto partner = backend.getChannelEqBands(outputId, static_cast<uint32_t>(fr));
+    CHECK_EQ(partner.size(), std::size_t{1});
+    if (partner.size() == 1) {
+        CHECK_NEAR(partner[0].freqHz, 777.0, 1e-9);
+        CHECK_NEAR(partner[0].gainDb, -5.5, 1e-9);
+    }
+
+    // An UNLINKED channel must not be touched by it.
+    const int fc = channelIndexOf(backend, outputId, "FC");
+    if (fc >= 0) {
+        const auto other = backend.getChannelEqBands(outputId, static_cast<uint32_t>(fc));
+        CHECK(other.size() != 1 || std::abs(other[0].freqHz - 777.0) > 1.0);
+    }
+}
+
+// The daemon refuses a send past its per-output limit; the fake has to as well,
+// or the UI's "N/8 used" and its disabled switch cannot be exercised in demo.
+void testDemoSendLimitIsEnforced() {
+    FakeBackend backend;
+    const QString outputId = "output-2"; // seeded with one routed input
+    const int fl = channelIndexOf(backend, outputId, "FL");
+    if (fl < 0) {
+        return;
+    }
+
+    // Fill the pool with distinct inputs.
+    QVector<QString> added;
+    while (backend.listInputs().size() < backend.maxSendsPerOutput() + 2) {
+        added.push_back(backend.addInput(QString("Extra %1").arg(added.size())));
+    }
+
+    int accepted = 0;
+    for (const InputRow& input : backend.listInputs()) {
+        if (backend.setSend(outputId, static_cast<uint32_t>(fl), input.id, 0.0)) {
+            ++accepted;
+        }
+    }
+
+    // Distinct routed inputs can never exceed the limit.
+    QSet<QString> routed;
+    for (const SendEntry& entry : backend.getOutputSends(outputId)) {
+        routed.insert(entry.inputId);
+    }
+    CHECK(routed.size() <= backend.maxSendsPerOutput());
+    CHECK(accepted > 0);
+}
+
 void testDemoUnlinkSeparatesChannels() {
     FakeBackend backend;
     const QString outputId = "output-1";
@@ -674,6 +742,8 @@ int main(int argc, char** argv) {
 
     RUN(testDemoLinkAdoptsLeaderValues);
     RUN(testDemoLinkSharesTheCurve);
+    RUN(testDemoEditingLinkedCurveChangesPartner);
+    RUN(testDemoSendLimitIsEnforced);
     RUN(testDemoUnlinkSeparatesChannels);
     RUN(testDemoLinkRefusesInvalidRequests);
     RUN(testDemoLinkedGainMovesAllMembers);

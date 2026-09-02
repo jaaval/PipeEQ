@@ -9,9 +9,11 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
+#include <QSet>
 #include <QPushButton>
 #include <QVBoxLayout>
 
+#include "app_config.h"
 #include "eq_curve_widget.h"
 #include "model/app_state.h"
 #include "theme/theme.h"
@@ -48,7 +50,8 @@ QString formatFreq(double freqHz) {
     return QString::number(freqHz, 'f', 0);
 }
 
-constexpr int kMaxBands = 16;
+// The shared limit, not a second copy of the number.
+constexpr int kMaxBands = static_cast<int>(eqcore::kMaxBands);
 
 } // namespace
 
@@ -434,20 +437,24 @@ void EqEditor::showCopyDialog() {
                                   &dialog));
 
     QVector<QPair<QCheckBox*, StripRow>> targets;
-    QString lastGroupKey;
+    // Tracks EVERY group already offered, not just the previous strip's.
+    // Comparing against only the preceding entry worked for contiguous members
+    // and listed a group once per member as soon as its channel indices were
+    // non-contiguous, which createLinkGroup permits.
+    QSet<QString> offeredGroups;
     for (const StripRow& strip : state_->strips()) {
         if (strip.id == source->id) {
             continue;
         }
         // A linked channel shares its group's curve, so copying onto one member
-        // changes the whole group. Offer only the group's leader and say so,
+        // changes the whole group. Offer only one entry per group and say so,
         // rather than listing members that would silently do the same thing.
         const QString groupKey =
             strip.groupId.isEmpty() ? strip.id : (strip.outputId + ":" + strip.groupId);
-        if (groupKey == lastGroupKey) {
+        if (offeredGroups.contains(groupKey)) {
             continue;
         }
-        lastGroupKey = groupKey;
+        offeredGroups.insert(groupKey);
 
         QString label = strip.label();
         if (!strip.groupId.isEmpty()) {

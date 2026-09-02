@@ -168,6 +168,7 @@ std::optional<AppConfig> migrateV1(const nlohmann::json& j, std::vector<std::str
         for (const std::string& position : {leftName, rightName}) {
             OutputChannelConfig channel;
             channel.position = position;
+            channel.devicePosition = position;
             channel.gainDb = gainDb;
             channel.muted = muted;
             channel.eqInstanceId = eqInstanceId;

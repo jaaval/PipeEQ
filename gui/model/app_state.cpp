@@ -39,12 +39,44 @@ AppState::AppState(bool demo, QObject* parent) : QObject(parent) {
     connect(worker_, &BackendWorker::channelDetailReady, this,
             [this](const QString& outputId, uint32_t channelIndex,
                     const QVector<eqcore::EqBand>& bands) {
-                details_[detailKey(outputId, channelIndex)].bands = bands;
+                // Held bands are being dragged right now, and the incoming copy
+                // is from before the drag started. Merging per band rather than
+                // dropping the whole reply, so an untouched band still updates.
+                const QString stripId = outputId + "#" + QString::number(channelIndex);
+                QVector<eqcore::EqBand> merged = bands;
+                const QVector<eqcore::EqBand>& local =
+                    details_[detailKey(outputId, channelIndex)].bands;
+                for (int i = 0; i < merged.size() && i < local.size(); ++i) {
+                    if (guard_.isHeld(EditKey{stripId, Field::EqBand, i})) {
+                        merged[i] = local[i];
+                    }
+                }
+                if (guard_.isHeld(EditKey{stripId, Field::EqBandCount, -1}) &&
+                    merged.size() != local.size()) {
+                    return; // a band add/remove is still in flight
+                }
+                details_[detailKey(outputId, channelIndex)].bands = merged;
                 emit channelDetailUpdated(outputId, channelIndex);
             });
     connect(worker_, &BackendWorker::outputSendsReady, this,
             [this](const QString& outputId, const QVector<SendEntry>& sends) {
-                sends_.insert(outputId, sends);
+                QVector<SendEntry> merged = sends;
+                const QVector<SendEntry>& local = sends_[outputId];
+                for (SendEntry& entry : merged) {
+                    const QString key = outputId + "#" + QString::number(entry.channelIndex) + ":" +
+                                        entry.inputId;
+                    if (!guard_.isHeld(EditKey{key, Field::Send, -1})) {
+                        continue;
+                    }
+                    // Keep the level the user is dragging.
+                    for (const SendEntry& existing : local) {
+                        if (existing.channelIndex == entry.channelIndex &&
+                            existing.inputId == entry.inputId) {
+                            entry.gainDb = existing.gainDb;
+                        }
+                    }
+                }
+                sends_.insert(outputId, merged);
                 emit sendsUpdated(outputId);
             });
 
@@ -219,9 +251,15 @@ void AppState::onSnapshotReady(const DaemonSnapshot& snapshot) {
     }
 
     snapshot_ = merged;
-    // Expiring a hold is what releases any value that was withheld while it was
-    // active: the next snapshot then carries the daemon's value through.
-    guard_.takeExpiredKeys();
+
+    // Anything whose hold has just expired had daemon values withheld from it
+    // while it was held, so ask for the truth now. Without this a remote change
+    // that arrived mid-drag stayed invisible until some later refresh happened
+    // to occur - the header documented a "deferred value" mechanism that did
+    // not exist, and this is the honest version of it.
+    if (!guard_.takeExpiredKeys().isEmpty()) {
+        refresh();
+    }
 
     if (topologyMoved) {
         emit topologyChanged();
@@ -337,7 +375,13 @@ void AppState::setChannelGain(const QString& outputId, uint32_t channelIndex, do
     op.channelIndex = channelIndex;
     op.doubleArg = gainDb;
     enqueue(op, EditKey{stripId, Field::Gain, -1}, /*flushNow=*/false);
-    emit stripsUpdated();
+
+    // Deliberately NOT emitting stripsUpdated here. This runs once per
+    // mouse-move event, and that signal makes the window refresh every strip in
+    // the rack plus the EQ preview - which re-evaluates the filter response per
+    // pixel column. The strip being dragged already paints its own local value,
+    // and the daemon's change notification converges everything else.
+    emit channelValueChanged(outputId, channelIndex);
 }
 
 void AppState::setSend(const QString& outputId, uint32_t channelIndex, const QString& inputId,

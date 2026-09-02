@@ -78,6 +78,9 @@ private:
         double gainDb = 0.0;
         bool muted = false;
         QString groupId;
+        // Configured but not offered by the device's current profile, i.e. a
+        // retired channel. Lets the demo exercise the "CH N/A" presentation.
+        bool retired = false;
         std::vector<eqcore::EqBand> bands;
         std::map<QString, double> sendsDb;
     };

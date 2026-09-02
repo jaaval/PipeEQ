@@ -18,10 +18,12 @@ class DetailPanel;
 class EqEditor;
 class StripRack;
 
-// Transitional window: the same layout as before, but a row in the left-hand
-// list is now one hardware output CHANNEL rather than one stereo-pair output.
-// This exists so the daemon rework could land with a working GUI on top of it;
-// the TotalMix-style rack replaces it wholesale.
+// The application window: a top bar for output management, a detail area for
+// the selected channel (its sends and EQ, or the full EQ editor), and the mixer
+// strip rack along the bottom.
+//
+// Holds no state of its own beyond the current selection - everything it draws
+// comes from AppState, and every change it makes goes back through it.
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -57,10 +59,10 @@ private:
     void saveSession() const;
     void selectStrip(const QString& stripId);
     void loadStripDetail(const StripRow& strip);
-    // Refreshes only what can change without the strip set changing (labels,
-    // connected state, gain/mute/auto-connect), leaving the band and mixer
-    // tables alone - rebuilding those on a refresh would yank widgets out from
-    // under a slider the user is dragging.
+    // Refreshes only what can change without the strip set changing: labels,
+    // connected state, and the values shown on existing strips. Deliberately
+    // does not rebuild anything, since rebuilding destroys widgets and would
+    // drop a drag in progress.
     void updateStripStatus();
     const StripRow* findStrip(const QString& stripId) const;
     // The device row for a strip's target, or null when it isn't present.

@@ -19,16 +19,31 @@ cd "$(dirname "$0")/.."
 
 TSAN_DIR="${TSAN_DIR:-build-tsan}"
 DBG_DIR="${DBG_DIR:-build-dbg}"
-SUITES=(test_ring_buffer test_peak_meter test_output_processor test_rt_no_alloc)
+# Every suite that starts more than one thread.
+TSAN_SUITES=(test_ring_buffer test_peak_meter test_output_processor)
+
+# Helgrind gets a SUBSET, and the omission is deliberate rather than an
+# oversight. Helgrind derives happens-before from locks and does not model
+# C++11 atomics, so the lock-free snapshot publication in OutputProcessor - an
+# atomic pointer plus a generation counter, with no lock anywhere by design -
+# reports as a data race on every read. ThreadSanitizer does model those
+# orderings and is the correct detector for that file; running it under both
+# would mean maintaining a suppression list that hides exactly the reports worth
+# seeing. test_rt_no_alloc is single-threaded and replaces the allocator, so it
+# belongs under neither.
+HG_SUITES=(test_ring_buffer test_peak_meter)
 
 failures=0
 
 echo "=== ThreadSanitizer ==="
 cmake -S . -B "$TSAN_DIR" -DPIPEEQ_SANITIZE=thread -DPIPEEQ_BUILD_GUI=OFF \
     -DCMAKE_BUILD_TYPE=Debug > /dev/null || exit 1
-cmake --build "$TSAN_DIR" -j"$(nproc)" --target "${SUITES[@]}" > /dev/null || exit 1
-for suite in "${SUITES[@]}"; do
-    if "$TSAN_DIR/tests/$suite" > /tmp/race_tsan_$suite.log 2>&1; then
+cmake --build "$TSAN_DIR" -j"$(nproc)" --target "${TSAN_SUITES[@]}" > /dev/null || exit 1
+for suite in "${TSAN_SUITES[@]}"; do
+    # Bounded, so a hang fails the run instead of blocking it forever - the
+    # exact failure mode that made Helgrind look merely slow once.
+    if PIPEEQ_TEST_CONCURRENCY_MS="${PIPEEQ_TEST_CONCURRENCY_MS:-200}" \
+        timeout 300 "$TSAN_DIR/tests/$suite" > /tmp/race_tsan_$suite.log 2>&1; then
         echo "ok:   $suite"
     else
         echo "FAIL: $suite (see /tmp/race_tsan_$suite.log)" >&2
@@ -42,8 +57,8 @@ if ! command -v valgrind > /dev/null; then
     echo "skip: valgrind not installed"
 else
     cmake -S . -B "$DBG_DIR" -DCMAKE_BUILD_TYPE=Debug -DPIPEEQ_BUILD_GUI=OFF > /dev/null || exit 1
-    cmake --build "$DBG_DIR" -j"$(nproc)" --target "${SUITES[@]}" > /dev/null || exit 1
-    for suite in "${SUITES[@]}"; do
+    cmake --build "$DBG_DIR" -j"$(nproc)" --target "${HG_SUITES[@]}" > /dev/null || exit 1
+    for suite in "${HG_SUITES[@]}"; do
         if PIPEEQ_TEST_CONCURRENCY_MS="${PIPEEQ_TEST_CONCURRENCY_MS:-40}" \
             timeout 300 valgrind --tool=helgrind --fair-sched=yes --error-exitcode=99 --quiet \
             "$DBG_DIR/tests/$suite" > /tmp/race_hg_$suite.log 2>&1; then

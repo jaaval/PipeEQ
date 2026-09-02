@@ -160,19 +160,34 @@ void testMultichannelLayouts() {
     }
 }
 
-// A concurrent writer and two readers, as the daemon really runs it. Under
-// -DPIPEEQ_SANITIZE=thread this is the check that the atomic payload actually
-// removed the data race; without sanitizers it at least asserts no reader ever
-// sees a value the writer never wrote (which a torn float could produce).
+// A concurrent writer and two readers, as the daemon really runs it.
+//
+// The writer alternates between two bit patterns chosen so that a TORN read is
+// detectable: mixing the high half of one with the low half of the other cannot
+// produce either value. An earlier version of this test wrote a single constant,
+// which made the assertion mathematically incapable of failing - tearing between
+// two identical floats yields that same float - so reverting the atomic payload
+// still passed it three times over.
+//
+// Under -DPIPEEQ_SANITIZE=thread this is also the check that the atomic payload
+// removed the data race outright.
 void testConcurrentWriterAndReaders() {
     RingBuffer buffer(1024, 2);
     std::atomic<bool> stop{false};
     std::atomic<bool> sawImpossibleValue{false};
 
+    // 0x3F000000 and 0x40A00000: every byte of the two differs in the exponent
+    // and mantissa, so any half-and-half combination is a third value.
+    constexpr float kValueA = 0.5f;
+    constexpr float kValueB = 5.0f;
+
     std::thread writer([&] {
-        std::vector<float> block(128 * 2, 0.5f);
+        std::vector<float> blockA(128 * 2, kValueA);
+        std::vector<float> blockB(128 * 2, kValueB);
+        bool useA = true;
         while (!stop.load(std::memory_order_relaxed)) {
-            buffer.write(block.data(), 128);
+            buffer.write(useA ? blockA.data() : blockB.data(), 128);
+            useA = !useA;
         }
     });
 
@@ -182,8 +197,9 @@ void testConcurrentWriterAndReaders() {
         while (!stop.load(std::memory_order_relaxed)) {
             buffer.readAt(cursor, out.data(), 64);
             for (float sample : out) {
-                // Only 0.0 (never written / zero-filled) and 0.5 are possible.
-                if (sample != 0.0f && sample != 0.5f) {
+                // Only the zero-fill and the two written values are possible.
+                // Anything else is a torn read.
+                if (sample != 0.0f && sample != kValueA && sample != kValueB) {
                     sawImpossibleValue.store(true, std::memory_order_relaxed);
                 }
             }

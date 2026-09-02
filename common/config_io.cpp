@@ -92,11 +92,40 @@ LoadResult loadConfig() {
         return result;
     }
 
-    // A document from a newer PipeEQ is emphatically not something to
-    // "helpfully" reduce to whatever this version understands.
-    const int version = j.is_object() && j.contains("version") && j["version"].is_number_integer()
-                            ? j["version"].get<int>()
-                            : 1;
+    // Version detection has to be lenient about TYPE but strict about presence.
+    //
+    // Reading it with is_number_integer() only meant "version": 2.0 or "2" fell
+    // through to 1, ran the v1 migration, found no "routes", and produced an
+    // empty-but-VALID config that was then persisted straight over the original.
+    // Every output, channel, send and curve gone. The presence of the key at
+    // all is what marks a document as v2-or-newer.
+    int version = 1;
+    if (j.is_object()) {
+        const auto it = j.find("version");
+        if (it != j.end()) {
+            if (it->is_number()) {
+                version = static_cast<int>(it->get<double>());
+            } else if (it->is_string()) {
+                bool ok = false;
+                const std::string text = it->get<std::string>();
+                try {
+                    version = std::stoi(text);
+                    ok = true;
+                } catch (const std::exception&) {
+                    ok = false;
+                }
+                if (!ok) {
+                    result.status = LoadStatus::Failed;
+                    result.message = "\"version\" is not a number (" + text + ")";
+                    return result;
+                }
+            } else {
+                result.status = LoadStatus::Failed;
+                result.message = "\"version\" is present but is not a number";
+                return result;
+            }
+        }
+    }
     if (version > kConfigVersion) {
         result.status = LoadStatus::Failed;
         result.message = "config version " + std::to_string(version) +
@@ -124,6 +153,17 @@ LoadResult loadConfig() {
             result.status = LoadStatus::Failed;
             result.message = "refusing to migrate: could not back up the existing config to " +
                               backupPath + " (" + ec.message() + ")";
+            return result;
+        }
+
+        // A migration that yields nothing from a document that plainly had
+        // content is a misread, not an empty config. Persisting it would
+        // destroy the original, which is exactly what persistable() exists to
+        // prevent.
+        if (migrated->outputs.empty() && j.is_object() && j.contains("routes")) {
+            result.status = LoadStatus::Failed;
+            result.message = "the v" + std::to_string(version) +
+                              " config has a \"routes\" key but no output could be read from it";
             return result;
         }
 

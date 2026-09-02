@@ -9,6 +9,7 @@ EditGuard::EditGuard(QObject* parent) : QObject(parent) {
 void EditGuard::beginEdit(const EditKey& key) {
     Hold& hold = holds_[key.toString()];
     hold.active = true;
+    hold.startedAtMs = clock_.elapsed();
     hold.releasedAtMs = -1;
 }
 
@@ -27,7 +28,9 @@ bool EditGuard::isHeld(const EditKey& key) const {
         return false;
     }
     if (it->active) {
-        return true;
+        // A widget destroyed mid-drag never sends its release, so an active
+        // hold cannot be trusted indefinitely.
+        return it->startedAtMs < 0 || (clock_.elapsed() - it->startedAtMs) < kMaxHoldMs;
     }
     // Still held while a write we sent hasn't come back, even if the grace
     // period has elapsed: the value on screen is the truth until the daemon
@@ -57,8 +60,10 @@ QVector<QString> EditGuard::takeExpiredKeys() {
     const qint64 now = clock_.elapsed();
 
     for (auto it = holds_.begin(); it != holds_.end();) {
+        const bool activeAndFresh =
+            it->active && (it->startedAtMs < 0 || (now - it->startedAtMs) < kMaxHoldMs);
         const bool stillHeld =
-            it->active || it->pendingWrites > 0 ||
+            activeAndFresh || it->pendingWrites > 0 ||
             (it->releasedAtMs >= 0 && (now - it->releasedAtMs) < kGraceMs);
         if (stillHeld) {
             ++it;

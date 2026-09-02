@@ -20,8 +20,11 @@ void BackendWorker::initialize() {
         backend_ = std::make_unique<DbusClient>();
     }
 
-    // Direct connections: both objects live on this thread, and the store
-    // receives these across the thread boundary via its own queued connections.
+    // Auto connections. Both objects live on this thread, but the backend emits
+    // some of these from sdbus's own event-loop thread, so Qt resolves those to
+    // queued delivery - which is correct, and is why they must not be forced to
+    // Qt::DirectConnection. The store then receives them across the thread
+    // boundary via its own queued connections.
     connect(backend_.get(), &Backend::outputChanged, this, &BackendWorker::daemonOutputChanged);
     connect(backend_.get(), &Backend::outputsChanged, this, &BackendWorker::daemonOutputsChanged);
     connect(backend_.get(), &Backend::inputsChanged, this, &BackendWorker::daemonInputsChanged);

@@ -15,12 +15,16 @@
 
 namespace pipeeq {
 
-// Thin wrapper around an sdbus-c++ proxy to org.pipeeq.Daemon1. Method calls
-// are synchronous (fine for a control GUI - they're infrequent and local; the
-// planned rework moves them off the GUI thread). Signals received on the
-// proxy's own background thread are re-emitted as Qt signals, which Qt
-// automatically delivers to the GUI thread via a queued connection since this
-// object lives on it.
+// Thin wrapper around an sdbus-c++ proxy to org.pipeeq.Daemon1.
+//
+// Method calls are synchronous, which is fine because this object lives on
+// BackendWorker's thread rather than the GUI thread - blocking here never
+// stalls a repaint. The proxy is constructed there for the same reason it must
+// be: an sdbus proxy is bound to its creating thread.
+//
+// Signals arrive on the proxy's own background thread and are re-emitted as Qt
+// signals; the store's connections to them are queued, which is what carries
+// them safely to the GUI thread.
 class DbusClient : public Backend {
     Q_OBJECT
 
@@ -28,7 +32,12 @@ public:
     explicit DbusClient(QObject* parent = nullptr);
     ~DbusClient() override;
 
-    bool isAvailable() const override { return proxy_ != nullptr; }
+    // Reflects whether a call has actually SUCCEEDED, not merely whether a
+    // proxy could be constructed. sdbus::createProxy performs no round trip and
+    // does not check that anyone owns the destination name, so the old
+    // `proxy_ != nullptr` was true with no daemon running at all - and the UI
+    // then showed "No outputs configured" instead of "not connected".
+    bool isAvailable() const override { return available_; }
 
     std::vector<DeviceRow> listDevices() override;
     // One row per channel of every configured output.
@@ -85,7 +94,12 @@ private:
     // duplicated here.
     static constexpr int kMaxSendsPerOutput = 8;
 
+    // Set by any successful call, cleared by any failure. Probed once at
+    // construction so the first paint is already correct.
+    void probeAvailability();
+
     std::unique_ptr<sdbus::IProxy> proxy_;
+    bool available_ = false;
 };
 
 } // namespace pipeeq

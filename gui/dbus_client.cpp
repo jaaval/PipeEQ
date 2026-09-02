@@ -28,6 +28,24 @@ QString stripId(const QString& outputId, uint32_t channelIndex) {
 } // namespace
 
 // The two-string setters are otherwise four copies of the same try/catch.
+// A cheap real call, so availability reflects a daemon that answers rather than
+// a bus that exists.
+void DbusClient::probeAvailability() {
+    if (!proxy_) {
+        available_ = false;
+        return;
+    }
+    try {
+        std::vector<InputStructRow> rows;
+        proxy_->callMethod(eqcore::dbus::kMethodListInputs)
+            .onInterface(eqcore::dbus::kInterfaceName)
+            .storeResultsTo(rows);
+        available_ = true;
+    } catch (const sdbus::Error&) {
+        available_ = false;
+    }
+}
+
 bool DbusClient::callSetter(const char* method, const std::string& a, const std::string& b) {
     if (!proxy_) {
         return false;
@@ -67,6 +85,8 @@ DbusClient::DbusClient(QObject* parent) : Backend(parent) {
         qWarning("pipeeq-gui: cannot reach the session bus: %s", e.what());
         return;
     }
+
+    probeAvailability();
 
     proxy_->uponSignal(eqcore::dbus::kSignalOutputChanged)
         .onInterface(eqcore::dbus::kInterfaceName)
@@ -456,6 +476,7 @@ bool DbusClient::setChannelEqBand(const QString& outputId, uint32_t channelIndex
 std::vector<InputRow> DbusClient::listInputs() {
     std::vector<InputRow> result;
     if (!proxy_) {
+        available_ = false;
         return result;
     }
     try {
@@ -472,7 +493,9 @@ std::vector<InputRow> DbusClient::listInputs() {
             }
             result.push_back(std::move(input));
         }
+        available_ = true;
     } catch (const sdbus::Error& e) {
+        available_ = false;
         qWarning("pipeeq-gui: ListInputs failed: %s", e.what());
     }
     return result;

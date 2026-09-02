@@ -54,7 +54,9 @@ public:
     // Repaints only the meter area. The static parts - labels, badges, fader cap
     // - then never repaint on a meter tick, which is the biggest single win in
     // the whole metering path.
-    void refreshMeters();
+    // `force` repaints even when nothing moved, which a cleared clip latch
+    // needs: the skip-if-unchanged check would otherwise swallow it.
+    void refreshMeters(bool force = false);
 
 signals:
     void selectRequested();
@@ -64,10 +66,9 @@ signals:
     void gainEditBegan();
     void gainEditFinished();
     void muteToggled(bool muted);
-    // The link badge was clicked: unlink if this is a group, otherwise toggle
-    // this strip's membership of the pending multi-selection.
-    void linkToggleRequested();
     void positionClicked();
+    // The clip indicator was clicked: clear the latch for this strip's members.
+    void clipClearRequested();
     // Ctrl+click: add or remove this strip from the pending multi-selection.
     void linkSelectionToggled();
     // Dragging FROM the link badge. The rack resolves the position to a strip.

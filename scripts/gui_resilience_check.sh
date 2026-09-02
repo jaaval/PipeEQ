@@ -44,12 +44,27 @@ xvfb-run -a --server-args="-screen 0 1100x720x24" bash -c '
 
     if kill -0 $GUI 2>/dev/null; then
         echo "GUI_SURVIVED_DAEMON_DEATH"
-        # A frozen GUI still answers kill -0, so prove it is still PAINTING by
-        # capturing it: a wedged Qt event loop leaves the window content stale
-        # and, under a fresh X server with no compositor, blank.
-        import -window root "'"$WORKDIR"'/after.png" 2>/dev/null
-        COLORS=$(magick "'"$WORKDIR"'/after.png" -format %k info: 2>/dev/null)
-        echo "COLORS_AFTER=$COLORS"
+        # A frozen GUI still answers kill -0, so liveness proves nothing, and
+        # neither does a screenshot: with no compositor X retains the last
+        # painted contents, so a stopped process looks identical to a healthy
+        # one. Comparing two captures does not work either - once the daemon is
+        # gone the meters correctly decay to silence and then stop changing, so
+        # a healthy GUI also settles at zero pixels changed. That false negative
+        # was found by running this check against a deliberately SIGSTOPped GUI
+        # and then against a healthy one, and getting 0 both times.
+        #
+        # Consumed CPU time is the probe that actually separates them: a
+        # SIGSTOPped or deadlocked process accrues exactly none, while a running
+        # event loop with a 30 Hz meter timer accrues some every second.
+        #
+        # From schedstat, in NANOSECONDS. /proc/PID/stat is in 10 ms clock ticks
+        # and an idle-but-healthy GUI uses less than one of those in two
+        # seconds, so it read zero for both the healthy and the frozen case.
+        # Measured: ~27 ms running, exactly 0 stopped.
+        NS_BEFORE=$(awk "{print \$1}" /proc/$GUI/schedstat 2>/dev/null || echo 0)
+        sleep 2
+        NS_AFTER=$(awk "{print \$1}" /proc/$GUI/schedstat 2>/dev/null || echo 0)
+        echo "CPU_NS=$((NS_AFTER - NS_BEFORE))"
     else
         echo "GUI_DIED_WITH_DAEMON"
     fi
@@ -61,11 +76,13 @@ grep -q GUI_UP_WITH_DAEMON "$WORKDIR/run.log" && report "the GUI starts against 
 grep -q GUI_SURVIVED_DAEMON_DEATH "$WORKDIR/run.log" && report "the GUI survives the daemon being killed" ok \
     || report "the GUI survives the daemon being killed" bad
 
-colors=$(grep -oP '(?<=COLORS_AFTER=)\d+' "$WORKDIR/run.log" || echo 0)
-if [[ "${colors:-0}" -gt 50 ]]; then
-    report "the GUI is still painting afterwards ($colors distinct colours)" ok
+# A wedged process accrues exactly zero CPU ticks; a live event loop accrues
+# some. This is the assertion that the 25-second sdbus stall would have failed.
+nanos=$(grep -oP '(?<=CPU_NS=)-?\d+' "$WORKDIR/run.log" | head -1 || echo 0)
+if [[ "${nanos:-0}" -gt 1000000 ]]; then
+    report "the GUI event loop is still running afterwards ($((nanos / 1000000)) ms CPU in 2 s)" ok
 else
-    report "the GUI is still painting afterwards (only ${colors:-0} distinct colours)" bad
+    report "the GUI event loop appears wedged (${nanos:-0} ns CPU in 2 s)" bad
 fi
 
 if [[ "$failures" -gt 0 ]]; then

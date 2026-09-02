@@ -64,6 +64,18 @@ struct OutputChannelConfig {
     // into this channel. Declaring a position the device has no port for
     // would break the 1:1 link instead.
     std::string position;
+
+    // What the DEVICE advertised for this channel index, as opposed to what the
+    // user assigned above. Two separate fields because matching and routing
+    // need different things: reshaping the channel list across a profile switch
+    // has to match on something the user cannot change, while routing has to
+    // honour what the user says the channel actually drives. Using one field
+    // for both meant a relabel was silently reverted on the next connect.
+    //
+    // Empty in configs written before this existed; treated as equal to
+    // `position` in that case.
+    std::string devicePosition;
+
     std::string displayName; // optional user label, e.g. "Monitor L"
     double gainDb = 0.0;
     bool muted = false;

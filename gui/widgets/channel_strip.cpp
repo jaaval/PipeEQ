@@ -203,7 +203,7 @@ void ChannelStrip::resizeEvent(QResizeEvent* event) {
     recomputeLayout();
 }
 
-void ChannelStrip::refreshMeters() {
+void ChannelStrip::refreshMeters(bool force) {
     if (!meters_ || strips_.isEmpty()) {
         return;
     }
@@ -225,7 +225,7 @@ void ChannelStrip::refreshMeters() {
         lastDrawnLevelDb_[i] = levelDb;
         lastDrawnClip_[i] = clipped;
     }
-    if (!changed) {
+    if (!changed && !force) {
         return;
     }
 
@@ -428,6 +428,14 @@ void ChannelStrip::mousePressEvent(QMouseEvent* event) {
         emit positionClicked();
         return;
     }
+    if (layout_.clip.contains(pos)) {
+        // Clips latch on purpose - one that flashes for a frame is one nobody
+        // sees - so there has to be a way to clear them. Nothing hit-tested
+        // this rect before, so a single transient left the indicator red for
+        // the life of the process.
+        emit clipClearRequested();
+        return;
+    }
 
     if (event->modifiers() & Qt::ControlModifier) {
         // Keyboard/accessibility parity for drag-to-link, and the only way to
@@ -560,9 +568,6 @@ void ChannelStrip::keyPressEvent(QKeyEvent* event) {
         if (!strips_.isEmpty()) {
             emit muteToggled(!strips_.front().muted);
         }
-        return;
-    case Qt::Key_L:
-        emit linkToggleRequested();
         return;
     case Qt::Key_Space:
         emit selectRequested();

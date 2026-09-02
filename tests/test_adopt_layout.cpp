@@ -20,14 +20,25 @@ using namespace pipeeq;
 using namespace eqcore;
 using Names = std::vector<std::string>;
 
+// A channel as a post-migration config holds it: the device's own name and the
+// user's routing assignment start out the same.
 OutputChannelConfig channel(const std::string& position, double gainDb, const std::string& eqId,
                              std::map<std::string, double> sends = {{"input-1", 0.0}}) {
     OutputChannelConfig c;
     c.position = position;
+    c.devicePosition = position;
     c.gainDb = gainDb;
     c.eqInstanceId = eqId;
     c.sendsDb = std::move(sends);
     return c;
+}
+
+Names devicePositionsOf(const OutputConfig& output) {
+    Names names;
+    for (const auto& c : output.channels) {
+        names.push_back(c.devicePosition);
+    }
+    return names;
 }
 
 Names positionsOf(const OutputConfig& output) {
@@ -122,11 +133,60 @@ void testFallsBackToIndexWhenNamesAllChange() {
 
     CHECK_EQ(result.appendedChannels, std::size_t{0});
     CHECK_EQ(result.retiredChannels, std::size_t{0});
-    CHECK_EQ(positionsOf(output), Names({"AUX0", "AUX1"}));
+    // The device's names change...
+    CHECK_EQ(devicePositionsOf(output), Names({"AUX0", "AUX1"}));
+    // ...but the ROUTING assignment does not. "This physical output is my front
+    // left speaker" is the user's statement about their room, and a profile
+    // rename is no reason to discard it - otherwise a stereo input would stop
+    // reaching those speakers entirely.
+    CHECK_EQ(positionsOf(output), Names({"FL", "FR"}));
     CHECK_NEAR(output.channels[0].gainDb, -5.0, 1e-12);
     CHECK_EQ(output.channels[0].eqInstanceId, std::string("eq-1"));
     CHECK_NEAR(output.channels[1].gainDb, -6.0, 1e-12);
     CHECK_EQ(output.channels[1].eqInstanceId, std::string("eq-2"));
+}
+
+// The reason position and devicePosition are separate fields: a relabel has to
+// survive the next connect. Previously adoptDeviceLayout overwrote `position`
+// with the device's name, so setting a channel's position had no lasting effect.
+void testUserRelabelSurvivesReconnect() {
+    OutputConfig output;
+    output.channels = {channel("FL", 0.0, "eq-1"), channel("FR", 0.0, "eq-1"),
+                        channel("RL", 0.0, ""), channel("RR", 0.0, "")};
+
+    // The user decides physical channel 2 actually feeds their centre speaker.
+    output.channels[2].position = "FC";
+
+    // Reconnecting to the very same device must not undo that.
+    adoptDeviceLayout(output, {"FL", "FR", "RL", "RR"});
+    CHECK_EQ(positionsOf(output), Names({"FL", "FR", "FC", "RR"}));
+    CHECK_EQ(devicePositionsOf(output), Names({"FL", "FR", "RL", "RR"}));
+
+    // ...and neither must a profile round trip.
+    adoptDeviceLayout(output, {"FL", "FR"});
+    adoptDeviceLayout(output, {"FL", "FR", "RL", "RR"});
+    CHECK_EQ(positionsOf(output), Names({"FL", "FR", "FC", "RR"}));
+}
+
+// A config written before devicePosition existed gets it backfilled once, from
+// the position it had at the time - which is what that field then meant.
+void testLegacyConfigBackfillsDevicePosition() {
+    OutputConfig output;
+    OutputChannelConfig legacyLeft;
+    legacyLeft.position = "FL";
+    OutputChannelConfig legacyRight;
+    legacyRight.position = "FR";
+    output.channels = {legacyLeft, legacyRight};
+
+    const AdoptResult result = adoptDeviceLayout(output, {"FL", "FR"});
+
+    CHECK(result.changed); // the backfill is a change, once
+    CHECK_EQ(devicePositionsOf(output), Names({"FL", "FR"}));
+    CHECK_EQ(positionsOf(output), Names({"FL", "FR"}));
+
+    // Idempotent from then on.
+    const AdoptResult again = adoptDeviceLayout(output, {"FL", "FR"});
+    CHECK(!again.changed);
 }
 
 // Mixed: some names match, the leftovers fall back to index.
@@ -137,9 +197,10 @@ void testPartialNameMatchThenIndexFallback() {
 
     adoptDeviceLayout(output, {"FL", "FR", "SL"});
 
-    CHECK_EQ(positionsOf(output), Names({"FL", "FR", "SL"}));
-    // RL had no name match, so it filled the remaining slot by index and
-    // adopted that slot's position.
+    CHECK_EQ(devicePositionsOf(output), Names({"FL", "FR", "SL"}));
+    // RL had no name match, so it filled the remaining slot by index, keeping
+    // its settings and its routing assignment.
+    CHECK_EQ(positionsOf(output), Names({"FL", "FR", "RL"}));
     CHECK_NEAR(output.channels[2].gainDb, -3.0, 1e-12);
     CHECK_EQ(output.channels[2].eqInstanceId, std::string("eq-3"));
 }
@@ -217,6 +278,8 @@ int main() {
     RUN(testProfileRoundTripRestoresSettings);
     RUN(testMatchesByNameNotByIndex);
     RUN(testFallsBackToIndexWhenNamesAllChange);
+    RUN(testUserRelabelSurvivesReconnect);
+    RUN(testLegacyConfigBackfillsDevicePosition);
     RUN(testPartialNameMatchThenIndexFallback);
     RUN(testLinkGroupsAreRemappedThroughReordering);
     RUN(testLinkGroupSurvivesRetirement);

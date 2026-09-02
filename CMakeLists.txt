@@ -49,12 +49,14 @@ add_subdirectory(daemon)
 add_subdirectory(packaging)
 
 if(PIPEEQ_BUILD_GUI)
-    find_package(Qt6 COMPONENTS Widgets)
-    if(Qt6Widgets_FOUND)
-        add_subdirectory(gui)
-    else()
-        message(WARNING "Qt6 Widgets not found - skipping pipeeq-gui target")
-    endif()
+    # REQUIRED on purpose. Skipping the GUI on a warning also silently dropped
+    # two test suites, while ctest still reported "100% tests passed" - and a
+    # negative find_package result is cached, so the next configure in that
+    # directory stayed broken with no new warning. Asking for the GUI and not
+    # getting it should be a hard error; -DPIPEEQ_BUILD_GUI=OFF is the way to
+    # opt out deliberately.
+    find_package(Qt6 REQUIRED COMPONENTS Widgets)
+    add_subdirectory(gui)
 endif()
 
 # Last, so it can test the GUI's model layer: that stanza is guarded on the

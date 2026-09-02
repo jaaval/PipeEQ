@@ -44,6 +44,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The isolation promise above is only real if OUR daemon is the one answering.
+# A daemon already running (systemd user unit, or bus activation from the
+# installed .service file) keeps the name, ours exits with FileExists, and every
+# check below then runs against the live daemon - mutating the real config and
+# opening streams on real hardware.
+if $BUS list 2>/dev/null | grep -q org.pipeeq.Daemon1; then
+    echo "FAIL: org.pipeeq.Daemon1 is already owned by another process." >&2
+    echo "      Stop it first (systemctl --user stop pipeeq-daemon), or this test" >&2
+    echo "      would run against your real daemon and real config." >&2
+    exit 1
+fi
+
 "$DAEMON" > "$WORKDIR/daemon.log" 2>&1 &
 DAEMON_PID=$!
 
@@ -53,6 +65,12 @@ for _ in $(seq 1 50); do
 done
 if ! $BUS list 2>/dev/null | grep -q org.pipeeq.Daemon1; then
     echo "FAIL: daemon never claimed the bus name" >&2
+    cat "$WORKDIR/daemon.log" >&2
+    exit 1
+fi
+# ...and that it is still ours, not a pre-existing one that won a race.
+if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+    echo "FAIL: our daemon exited; the bus name is owned by something else" >&2
     cat "$WORKDIR/daemon.log" >&2
     exit 1
 fi
@@ -72,7 +90,11 @@ check "a 5.1 input keeps its layout" '"FC" "LFE"' "$($BUS call $DEST ListInputs)
 # ---- outputs on a device that isn't present ----
 OUTPUT_ID=$($BUS call $DEST AddOutput ss nonexistent_device Ghost | tr -d 's "')
 check "AddOutput returns an id" "output-" "$OUTPUT_ID"
-check "an absent device yields a disconnected output" "false" "$($BUS call $DEST ListOutputs)"
+# Matched against THIS output's row rather than the whole reply: `check` is a
+# substring glob, and every ListOutputs row carries both a connected and an
+# autoConnect boolean, so looking for "false" anywhere always succeeded.
+check "an absent device yields a disconnected output" "\"$OUTPUT_ID\" \"nonexistent_device\" \"Ghost\" false" \
+    "$($BUS call $DEST ListOutputs)"
 
 # A device that isn't there has no layout, so there are no channels to drive
 # yet - the output is configured and waits, which is the documented behaviour.
@@ -87,18 +109,31 @@ DEVICES=$($BUS call $DEST ListDevices | grep -oP '"alsa_output[^"]*"' | tr -d '"
 DEVICE=$(grep -i hdmi <<< "$DEVICES" | head -1)
 [[ -z "$DEVICE" ]] && DEVICE=$(head -1 <<< "$DEVICES")
 if [[ -z "$DEVICE" ]]; then
-    echo "skip: no real ALSA sink present; channel/EQ/link checks need one"
+    # Silently skipping was worse than failing: it dropped ~70% of the
+    # assertions - every per-channel gain, the whole link/unlink EQ-sharing
+    # behaviour, sends, and position handling - and still printed a green
+    # "All D-Bus smoke checks passed."
+    echo "INCOMPLETE: no real ALSA sink present, so the channel, EQ, link and" >&2
+    echo "            send checks could not run. Set PIPEEQ_ALLOW_NO_SINK=1 to" >&2
+    echo "            treat that as acceptable." >&2
+    if [[ -z "${PIPEEQ_ALLOW_NO_SINK:-}" ]]; then
+        failures=$((failures + 1))
+    fi
 else
     REAL_ID=$($BUS call $DEST AddOutput ss "$DEVICE" Test | tr -d 's "')
     sleep 0.5
     CHANNELS=$($BUS call $DEST GetOutputChannels s "$REAL_ID")
     check "a present device yields channels" '"FL"' "$CHANNELS"
-    check "a present device connects" "true" "$($BUS call $DEST ListOutputs)"
+    check "a present device connects" "\"$REAL_ID\" \"$DEVICE\" \"Test\" true" \
+        "$($BUS call $DEST ListOutputs)"
 
     # ---- per-channel gain ----
     check "SetChannelGain succeeds" "b true" \
         "$($BUS call $DEST SetChannelGain sud -- "$REAL_ID" 0 -6.5)"
-    check "the gain landed on channel 0" "-6.5" "$($BUS call $DEST GetOutputChannels s "$REAL_ID")"
+    # Anchored to channel 0's row: "-6.5" anywhere in the reply would also have
+    # passed if the gain had landed on the wrong channel.
+    check "the gain landed on channel 0" "0 \"FL\" \"\" -6.5" \
+        "$($BUS call $DEST GetOutputChannels s "$REAL_ID")"
 
     # ---- link groups: one set must move both members ----
     GROUP_ID=$($BUS call $DEST CreateLinkGroup saus "$REAL_ID" 2 0 1 Mains | tr -d 's "')
@@ -173,10 +208,17 @@ else
     # ---- channel position is metadata, not a reconnect ----
     check "SetChannelPosition succeeds" "b true" \
         "$($BUS call $DEST SetChannelPosition sus "$REAL_ID" 0 FC)"
-    check "the output stayed connected across a position change" "true" \
+    check "the output stayed connected across a position change" "\"$REAL_ID\" \"$DEVICE\" \"Test\" true" \
         "$($BUS call $DEST ListOutputs)"
 
-    $BUS call $DEST RemoveOutput s "$REAL_ID" > /dev/null
+    check "RemoveOutput leaves no trace of it" "" "$($BUS call $DEST RemoveOutput s "$REAL_ID")"
+    removed_check=$($BUS call $DEST ListOutputs)
+    if [[ "$removed_check" == *"\"$REAL_ID\""* ]]; then
+        echo "FAIL: the output was still listed after RemoveOutput" >&2
+        failures=$((failures + 1))
+    else
+        echo "ok: RemoveOutput actually removed it"
+    fi
 fi
 
 # ---- metering is off until armed ----

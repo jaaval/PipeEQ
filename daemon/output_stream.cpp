@@ -169,11 +169,14 @@ void OutputStream::onProcess(void* userdata) {
         frames = static_cast<uint32_t>(b->requested);
     }
 
-    self->processor_.process(dst, frames, numChannels);
+    // Size the chunk from what was actually WRITTEN. process() clamps the frame
+    // count, and reporting the unclamped one handed the device the previous
+    // contents of the mapped buffer for the difference.
+    const uint32_t written = self->processor_.process(dst, frames, numChannels);
 
     buf->datas[0].chunk->offset = 0;
     buf->datas[0].chunk->stride = static_cast<int32_t>(stride);
-    buf->datas[0].chunk->size = frames * stride;
+    buf->datas[0].chunk->size = written * stride;
 
     pw_stream_queue_buffer(self->stream_, b);
 }

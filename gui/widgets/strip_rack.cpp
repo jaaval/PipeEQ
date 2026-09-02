@@ -233,6 +233,14 @@ void StripRack::connectStrip(ChannelStrip* strip) {
     connect(strip, &ChannelStrip::positionClicked, this,
             [this, strip] { emit positionClicked(strip->primaryId()); });
 
+    connect(strip, &ChannelStrip::clipClearRequested, this, [this, strip] {
+        for (const StripRow& member : strip->strips()) {
+            state_->meters().clearClip(member.outputId, static_cast<int>(member.channelIndex));
+        }
+        strip->refreshMeters(/*force=*/true);
+        emit statusMessage(QString());
+    });
+
     connect(strip, &ChannelStrip::linkSelectionToggled, this,
             [this, strip] { toggleLinkMark(strip); });
 

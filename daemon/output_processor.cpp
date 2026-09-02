@@ -27,21 +27,32 @@ void OutputProcessor::setSampleRate(uint32_t sampleRateHz) {
 }
 
 void OutputProcessor::publish(std::unique_ptr<const OutputSnapshot> next) {
-    // Read the generation BEFORE the swap: any block that can still observe the
-    // outgoing pointer must have started at or before this value.
-    const uint64_t generation = rtGeneration_.load(std::memory_order_acquire);
     const OutputSnapshot* previous = snapshot_.exchange(next.release(), std::memory_order_release);
+
+    // The generation MUST be sampled after the exchange, not before.
+    //
+    // Sampled before, a block that both started and finished between the sample
+    // and the exchange would still have observed the outgoing pointer while
+    // consuming the retire headroom - so a third block could be mid-process()
+    // on that pointer when the counter reached the threshold, and it would be
+    // freed underneath it. Sampled after, every reader of the outgoing pointer
+    // provably started before the exchange, and since process() is serialized
+    // on one realtime thread at most one such reader can be in flight: one
+    // observed increment is then sufficient proof it has finished.
+    const uint64_t generation = rtGeneration_.load(std::memory_order_acquire);
 
     if (previous) {
         retired_.emplace_back(generation, std::unique_ptr<const OutputSnapshot>(previous));
     }
     drainRetired();
 
-    // Growth is naturally bounded: drainRetired() frees everything the realtime
-    // thread has moved past, and the only window where the generation doesn't
-    // advance is between construction and the first negotiated block. Retaining
-    // is always the safe choice - freeing a snapshot the RT thread might still
-    // be reading is not - so this only warns rather than dropping anything.
+    // Growth is bounded only while the stream is actually running. PipeWire
+    // suspends idle nodes, so a connected-but-silent output stops calling
+    // process() and the generation stops advancing - a fader drag then retains
+    // every snapshot until the stream resumes or the output is torn down.
+    // Retaining is still the only safe choice, since freeing a snapshot the RT
+    // thread might be reading is exactly the bug this scheme exists to avoid,
+    // so this warns rather than dropping anything.
     if (retired_.size() > kMaxRetained && !retainWarned_) {
         retainWarned_ = true;
         std::fprintf(stderr,
@@ -53,16 +64,20 @@ void OutputProcessor::publish(std::unique_ptr<const OutputSnapshot> next) {
 
 void OutputProcessor::drainRetired() {
     const uint64_t now = rtGeneration_.load(std::memory_order_acquire);
-    // Two generations of headroom: a block could have started before our swap
-    // (bringing the counter to generation+1) after another had already
-    // completed since we sampled it.
-    std::erase_if(retired_, [&](const auto& entry) { return now >= entry.first + 2; });
+    // One observed increment past the post-exchange sample is proof: see
+    // publish(). Comparing with subtraction rather than addition so the test is
+    // still correct if the counter ever wraps.
+    std::erase_if(retired_, [&](const auto& entry) { return now - entry.first >= 1; });
 }
 
-void OutputProcessor::process(float* dst, uint32_t frames, uint32_t numChannels) {
+uint32_t OutputProcessor::process(float* dst, uint32_t frames, uint32_t numChannels) {
     const OutputSnapshot* snap = snapshot_.load(std::memory_order_acquire);
 
     numChannels = std::min<uint32_t>(numChannels, kMaxOutputChannels);
+    // Clamped, and the clamped value is RETURNED. The caller sizes the buffer
+    // chunk from it; reporting the unclamped count handed the device whatever
+    // was previously in the mapped buffer for the difference - stale audio at
+    // full scale rather than silence.
     frames = std::min<uint32_t>(frames, kScratchCapacityFrames);
     const uint32_t sampleCount = frames * numChannels;
 
@@ -71,7 +86,7 @@ void OutputProcessor::process(float* dst, uint32_t frames, uint32_t numChannels)
         // advance the generation so publish() can retire snapshots.
         std::fill(dst, dst + sampleCount, 0.0f);
         rtGeneration_.fetch_add(1, std::memory_order_release);
-        return;
+        return frames;
     }
 
     std::fill(dst, dst + sampleCount, 0.0f);
@@ -91,6 +106,21 @@ void OutputProcessor::process(float* dst, uint32_t frames, uint32_t numChannels)
         // exactly what slotSilent_ tracks.
         if (!slot.anyTaps && slotSilent_[slotIndex]) {
             continue;
+        }
+
+        // Slots are positional, but which input occupies a slot changes whenever
+        // the set of routed inputs does. Without this check a new occupant
+        // inherits the previous one's read cursor - and RingBuffer::readAt only
+        // resyncs a reader that is BEHIND, never one that is ahead, so an input
+        // whose own write index is lower would read silence until it caught up.
+        // At an hour of uptime that is an hour of silence.
+        if (slotIdentityCur_[slotIndex] != slot.identity) {
+            slotIdentityCur_[slotIndex] = slot.identity;
+            readCursors_[slotIndex] = slot.buffer->currentWriteIndex();
+            for (uint32_t ch = 0; ch < kMaxOutputChannels; ++ch) {
+                sendGainCur_[slotIndex][ch] = 0.0f; // fade the new input in
+            }
+            slotSilent_[slotIndex] = false;
         }
 
         const std::size_t inputChannels = slot.inputChannels;
@@ -198,6 +228,7 @@ void OutputProcessor::process(float* dst, uint32_t frames, uint32_t numChannels)
     }
 
     rtGeneration_.fetch_add(1, std::memory_order_release);
+    return frames;
 }
 
 } // namespace pipeeq

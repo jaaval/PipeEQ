@@ -116,6 +116,11 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
 
     connect(state_, &AppState::topologyChanged, this, &MainWindow::onTopologyChanged);
     connect(state_, &AppState::stripsUpdated, this, &MainWindow::onStripsUpdated);
+    // A local optimistic change to one channel: refresh only that output's
+    // strips, not the whole window. This fires once per mouse-move during a
+    // drag, so it must stay cheap.
+    connect(state_, &AppState::channelValueChanged, this,
+            [this](const QString&, uint32_t) { stripRack_->refreshValues(); });
     connect(state_, &AppState::channelDetailUpdated, this, &MainWindow::onChannelDetailUpdated);
     connect(state_, &AppState::sendsUpdated, this,
             [this](const QString&) { detailPanel_->refreshValues(); });
@@ -336,15 +341,22 @@ void MainWindow::onRemoveOutputClicked() {
     if (!strip) {
         return;
     }
+    // COPIED before the dialog. `strip` points into the store's cached vector,
+    // and QMessageBox::question runs a nested event loop in which the resync
+    // timer or any daemon signal can replace that vector - freeing the row out
+    // from under this pointer while the dialog is still open.
+    const QString outputId = strip->outputId;
+    const QString outputName = strip->outputName;
+
     // A strip is one channel, but removal is per output - be explicit rather
     // than quietly deleting the sibling channels too.
     const auto answer = QMessageBox::question(
         this, "Remove output",
-        QString("Remove the whole output \"%1\" and all of its channels?").arg(strip->outputName));
+        QString("Remove the whole output \"%1\" and all of its channels?").arg(outputName));
     if (answer != QMessageBox::Yes) {
         return;
     }
-    state_->removeOutput(strip->outputId);
+    state_->removeOutput(outputId);
 }
 
 void MainWindow::onAddInputClicked() {
@@ -376,8 +388,14 @@ void MainWindow::onTopologyChanged() {
 }
 
 void MainWindow::onStripsUpdated() {
-    // Values moved but the set didn't: update in place and leave the band table
-    // alone, so nothing is destroyed under a control someone is using.
+    // Values moved but the set didn't: update in place, so nothing is destroyed
+    // under a control someone is using.
+    //
+    // The device combo is refreshed too. Its contents depend on DeviceRow
+    // fields the topology comparison ignores - notably `inUse` - so a device
+    // being claimed by another output left the combo advertising it without the
+    // "in use" suffix until some unrelated topology change came along.
+    refreshDevices();
     updateStripStatus();
 }
 

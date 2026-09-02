@@ -248,12 +248,17 @@ void DetailPanel::renameOutput() {
     if (!strip) {
         return;
     }
+    // Copied before the dialog, for the same reason as renameChannel above:
+    // QInputDialog runs a nested event loop, and a snapshot arriving during it
+    // replaces the vector `strip` points into.
+    const QString outputId = strip->outputId;
+    const QString currentName = strip->outputName;
+
     bool accepted = false;
-    const QString name =
-        QInputDialog::getText(this, "Rename output", "Name for this output:", QLineEdit::Normal,
-                               strip->outputName, &accepted);
+    const QString name = QInputDialog::getText(this, "Rename output", "Name for this output:",
+                                                QLineEdit::Normal, currentName, &accepted);
     if (accepted && !name.trimmed().isEmpty()) {
-        state_->renameOutput(strip->outputId, name.trimmed());
+        state_->renameOutput(outputId, name.trimmed());
     }
 }
 

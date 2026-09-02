@@ -22,10 +22,15 @@ namespace pipeeq {
 //   (b) A PENDING COUNT, incremented per write and decremented when that write
 //       actually completes. The grace period is a guess; this is not, so a slow
 //       daemon can't let a stale value through just because the clock ran out.
-//   (c) A DEFERRED value: a remote change that arrived while held is stashed
-//       and applied once, on release. Dropping it forever is the other failure
-//       mode and it is worse - the UI would then lie about the daemon's actual
-//       value indefinitely.
+//   (c) A RESYNC on release: values withheld during a hold are not stashed, so
+//       the store re-reads once the hold expires (see AppState). Simply
+//       dropping them would be the other failure mode, and it is worse - the UI
+//       would then lie about the daemon's actual value indefinitely.
+//
+// A hold also has a hard ceiling. beginEdit/endEdit are driven by mouse press
+// and release on a widget, and a widget destroyed mid-drag never sends the
+// release - which used to leave the hold active for the life of the process,
+// permanently substituting a stale local value for the daemon's.
 class EditGuard : public QObject {
     Q_OBJECT
 
@@ -53,9 +58,15 @@ public:
     // isn't visibly stale after letting go.
     static constexpr qint64 kGraceMs = 400;
 
+    // The longest a single edit can hold a field. Far longer than any real drag,
+    // short enough that a lost release recovers on its own rather than freezing
+    // a control until restart.
+    static constexpr qint64 kMaxHoldMs = 15000;
+
 private:
     struct Hold {
         bool active = false;      // between beginEdit and endEdit
+        qint64 startedAtMs = -1;  // when beginEdit was called
         qint64 releasedAtMs = -1; // when the grace period started
         int pendingWrites = 0;
     };

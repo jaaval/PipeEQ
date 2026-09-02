@@ -19,11 +19,19 @@ AdoptResult adoptDeviceLayout(eqcore::OutputConfig& output,
     // newIndexOfOld[j] is where previous[j] ended up, or npos if unused so far.
     std::vector<std::size_t> newIndexOfOld(previous.size(), std::string::npos);
 
-    // 1. Match by position name.
+    // The name a previous entry should be matched on: what the DEVICE said,
+    // not what the user assigned. Falls back to `position` for entries written
+    // before devicePosition existed, where the two were the same thing.
+    const auto matchName = [](const eqcore::OutputChannelConfig& channel) {
+        return channel.devicePosition.empty() ? channel.position : channel.devicePosition;
+    };
+
+    // 1. Match by the device's own position name.
     for (std::size_t i = 0; i < deviceChannels; ++i) {
         for (std::size_t j = 0; j < previous.size(); ++j) {
-            if (!consumed[j] && previous[j].position == devicePositions[i]) {
+            if (!consumed[j] && matchName(previous[j]) == devicePositions[i]) {
                 live[i] = previous[j];
+                live[i].devicePosition = devicePositions[i];
                 consumed[j] = true;
                 filled[i] = true;
                 newIndexOfOld[j] = i;
@@ -45,7 +53,13 @@ AdoptResult adoptDeviceLayout(eqcore::OutputConfig& output,
             break;
         }
         live[i] = previous[nextUnused];
-        live[i].position = devicePositions[i]; // adopt the device's name for it
+        live[i].devicePosition = devicePositions[i];
+        // The user's routing assignment is NOT overwritten here. Only the
+        // device's own name for the channel changes; a channel the user
+        // relabelled keeps driving what they said it drives.
+        if (live[i].position.empty()) {
+            live[i].position = devicePositions[i];
+        }
         consumed[nextUnused] = true;
         filled[i] = true;
         newIndexOfOld[nextUnused] = i;
@@ -58,6 +72,7 @@ AdoptResult adoptDeviceLayout(eqcore::OutputConfig& output,
         }
         eqcore::OutputChannelConfig fresh;
         fresh.position = devicePositions[i];
+        fresh.devicePosition = devicePositions[i];
         live[i] = fresh;
         ++result.appendedChannels;
     }

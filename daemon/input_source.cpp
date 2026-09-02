@@ -1,5 +1,6 @@
 #include "input_source.h"
 
+#include <atomic>
 #include <cstdio>
 
 #include <spa/param/audio/format-utils.h>
@@ -24,6 +25,7 @@ InputSource::InputSource(pw_core* core, std::string id, std::string displayName,
                           std::vector<std::string> positions, uint32_t sampleRateHz)
     : id_(std::move(id)),
       displayName_(std::move(displayName)),
+      identity_(nextIdentity()),
       numChannels_(static_cast<int>(positions.size())),
       positions_(std::move(positions)),
       ringBuffer_(std::make_shared<RingBuffer>(sampleRateHz / 2, static_cast<int>(positions_.size()))) {
@@ -57,6 +59,13 @@ InputSource::InputSource(pw_core* core, std::string id, std::string displayName,
         static_cast<pw_stream_flags>(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS |
                                       PW_STREAM_FLAG_RT_PROCESS),
         params, 1);
+}
+
+// Monotonic and never reused, so an id reappearing on a different object still
+// looks like a different occupant to the realtime thread.
+uint64_t InputSource::nextIdentity() {
+    static std::atomic<uint64_t> counter{1};
+    return counter.fetch_add(1, std::memory_order_relaxed);
 }
 
 InputSource::~InputSource() {

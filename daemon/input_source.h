@@ -31,6 +31,9 @@ public:
     InputSource& operator=(const InputSource&) = delete;
 
     const std::string& id() const { return id_; }
+    // A process-unique number for this input, so the realtime thread can detect
+    // that a mix slot's occupant changed without comparing strings.
+    uint64_t identity() const { return identity_; }
     const std::string& displayName() const { return displayName_; }
     void setDisplayName(std::string displayName) { displayName_ = std::move(displayName); }
     int numChannels() const { return numChannels_; }
@@ -47,8 +50,11 @@ public:
                                 const char* error);
 
 private:
+    static uint64_t nextIdentity();
+
     std::string id_;
     std::string displayName_;
+    uint64_t identity_;
     int numChannels_;
     std::vector<std::string> positions_;
 

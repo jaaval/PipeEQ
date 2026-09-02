@@ -42,6 +42,10 @@ struct InputMixSlot {
     // OR over perChannel[]: is anything routed here AND audible? False lets
     // the RT thread skip this slot's ring-buffer read entirely.
     bool anyTaps = false;
+    // Identifies the input in this slot, so the realtime thread can tell that a
+    // slot's occupant changed without ever comparing strings. Zero means "no
+    // input"; the control thread assigns these.
+    uint64_t identity = 0;
     std::array<mix::ChannelTaps, kMaxOutputChannels> perChannel{};
 };
 
@@ -92,7 +96,11 @@ public:
 
     // Realtime thread only. `dst` is interleaved and `numChannels` wide, and is
     // both the mix accumulator and the output buffer.
-    void process(float* dst, uint32_t frames, uint32_t numChannels);
+    //
+    // Returns the number of frames actually written, which may be fewer than
+    // requested: `frames` is clamped to kScratchCapacityFrames. The caller must
+    // size its buffer chunk from the RETURN VALUE, not from what it asked for.
+    uint32_t process(float* dst, uint32_t frames, uint32_t numChannels);
 
     // Control thread. The peak magnitude since the previous call, then resets.
     float takeChannelPeak(std::size_t channel) { return meters_.takeAndReset(channel); }
@@ -127,6 +135,10 @@ private:
     // True once every send of a slot has actually reached zero, which is what
     // lets an unrouted slot be skipped without cutting a still-fading one.
     std::array<bool, kMaxInputs> slotSilent_{};
+    // Which input currently occupies each slot. Slots are positional and get
+    // renumbered whenever the routed-input set changes, so the persistent
+    // per-slot state above has to be reset when the occupant changes.
+    std::array<uint64_t, kMaxInputs> slotIdentityCur_{};
     std::array<std::size_t, kMaxInputs> readCursors_{};
     std::vector<float> mixScratch_;
     PeakMeterBank<kMaxOutputChannels> meters_;
