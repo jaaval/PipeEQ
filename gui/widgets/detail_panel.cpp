@@ -13,6 +13,7 @@
 
 #include "elided_label.h"
 #include "eq_preview.h"
+#include "strip_metrics.h"
 #include "position_selector.h"
 #include "model/app_state.h"
 #include "send_strip.h"
@@ -81,7 +82,7 @@ DetailPanel::DetailPanel(AppState* state, QWidget* parent) : QWidget(parent), st
     // at any larger one leaves the send strips huddled at the left of a mostly
     // empty column, with the "Add sink" button stranded against the EQ.
     auto* bodyRow = new QHBoxLayout;
-    bodyRow->setSpacing(10);
+    bodyRow->setSpacing(strip::kBodySpacing);
 
     sendsColumn_ = new QWidget(this);
     auto* sendColumn = new QVBoxLayout(sendsColumn_);
@@ -110,7 +111,7 @@ DetailPanel::DetailPanel(AppState* state, QWidget* parent) : QWidget(parent), st
     auto* sendContent = new QWidget(sendArea_);
     sendLayout_ = new QHBoxLayout(sendContent);
     sendLayout_->setContentsMargins(0, 0, 0, 0);
-    sendLayout_->setSpacing(5);
+    sendLayout_->setSpacing(strip::kSendSpacing);
     sendLayout_->addStretch(1);
     sendArea_->setWidget(sendContent);
     // The send strips grow with the panel, the same way the mixer strips grow
@@ -146,19 +147,52 @@ DetailPanel::DetailPanel(AppState* state, QWidget* parent) : QWidget(parent), st
     root->addLayout(bodyRow, 1);
 }
 
-// The sends column is sized to its content so it leaves no gap, but it must not
-// be allowed to crowd the EQ out on a narrow window - hence the share cap. The
-// header row is a floor: "SENDS INTO THIS CHANNEL  N/M used  [Add sink...]" is
-// wider than one or two strips.
+// The send strips match the mixer strips below, EXCEPT where that would take
+// the EQ below its floor share of the window.
+//
+// Two rows of faders at different widths reads as a mistake rather than as a
+// distinction, so matching is the default. But the sends grow with the number
+// of inputs while the EQ does not, and eight inputs at double width would push
+// the curve into a strip too narrow to read a filter shape in. So the EQ keeps
+// at least kEqMinimumShare and the sends take the requested scale only as far
+// as what is left allows - falling back towards their natural width rather
+// than being clipped or scrolled.
 void DetailPanel::updateSendsWidth() {
     if (!sendsColumn_ || !sendArea_ || !sendArea_->widget()) {
         return;
     }
-    const int strips = sendArea_->widget()->sizeHint().width();
+
+    const QMargins margins = layout() ? layout()->contentsMargins() : QMargins();
+    // The header is a floor on the column's width: "SENDS INTO THIS CHANNEL
+    // N/M used [Add sink...]" is wider than one or two strips.
     const int header = sendHeader_ ? sendHeader_->sizeHint().width() : 0;
-    const int wanted = std::max(strips, header);
-    const int share = std::max(320, width() * 3 / 5);
-    sendsColumn_->setMaximumWidth(std::min(wanted, share));
+    const strip::SendsPlan plan =
+        strip::planSends(width(), margins.left() + margins.right(),
+                          static_cast<int>(sendStrips_.size()), header, requestedWidthScale_);
+
+    for (auto it = sendStrips_.begin(); it != sendStrips_.end(); ++it) {
+        it.value()->setWidthScale(plan.scale);
+    }
+
+    // A FIXED width, not a maximum. A maximum is only a cap: the column would
+    // still take its own size hint, which comes from the scroll area and is
+    // unrelated to the strips inside it - so the column stayed at its header's
+    // width and the fourth send fell off the end behind a scrollbar. Nor can
+    // the width be read off the send row's layout, which reports a width that
+    // ignores the strips entirely: a QWidgetItem contributes nothing for a
+    // widget explicitly shown while its parent was not, the same trap as the
+    // rack's width and height.
+    sendsColumn_->setFixedWidth(plan.width);
+}
+
+// The mixer strips below changed width; match them, within what the EQ can
+// spare.
+void DetailPanel::setStripWidthScale(double scale) {
+    if (scale == requestedWidthScale_) {
+        return;
+    }
+    requestedWidthScale_ = scale;
+    updateSendsWidth();
 }
 
 void DetailPanel::resizeEvent(QResizeEvent* event) {
@@ -352,6 +386,8 @@ void DetailPanel::rebuildSends() {
         }
         strip->setInput(input);
         strip->show();
+        // A strip created after the scale was last applied still has to match.
+        strip->setWidthScale(requestedWidthScale_);
         kept.insert(input.id, strip);
     }
     for (auto it = sendStrips_.begin(); it != sendStrips_.end(); ++it) {

@@ -10,6 +10,7 @@
 #include <QWheelEvent>
 
 #include "fader_taper.h"
+#include "strip_metrics.h"
 #include "model/level_meters.h"
 #include "theme/paint_helpers.h"
 
@@ -17,11 +18,9 @@ namespace pipeeq {
 
 namespace {
 
-constexpr int kStripWidthSingle = 66;
 constexpr int kStripExtraPerMember = 14;
 constexpr int kRowHeight = 18;
 constexpr int kMeterWidth = 9;
-constexpr int kFaderWidth = 24;
 
 // Dragging with Shift held moves at this fraction of pointer speed, for fine
 // adjustment near unity.
@@ -30,11 +29,6 @@ constexpr double kFineDragFactor = 0.25;
 // How far the pointer must travel before a press on an unselected strip's fader
 // counts as a drag rather than a click.
 constexpr int kDragThresholdPx = 3;
-
-// The most a strip widens by on a roomy window. Some, but not much: past this
-// the meters are all a strip has to show for the space, and a mixer with eight
-// enormous channels reads worse than one with eight legible ones.
-constexpr double kMaxWidthScale = 2.0;
 
 QString formatDb(double db) {
     if (taper::isSilent(db)) {
@@ -171,15 +165,15 @@ QRect ChannelStrip::meterAreaRect() const {
 
 int ChannelStrip::naturalWidth() const {
     const int members = std::max(1, static_cast<int>(strips_.size()));
-    return kStripWidthSingle + (members - 1) * kStripExtraPerMember;
+    return strip::kBaseWidth + (members - 1) * kStripExtraPerMember;
 }
 
 double ChannelStrip::maxWidthScale() {
-    return kMaxWidthScale;
+    return strip::kMaxWidthScale;
 }
 
 void ChannelStrip::setWidthScale(double scale) {
-    const double clamped = std::clamp(scale, 1.0, kMaxWidthScale);
+    const double clamped = std::clamp(scale, 1.0, strip::kMaxWidthScale);
     if (clamped == widthScale_) {
         return;
     }
@@ -205,7 +199,7 @@ void ChannelStrip::recomputeLayout() {
     // twice that wide: the proportions are what make it read as a fader, and a
     // wider grip is easier to hit - which matters more now that the meter
     // beside it no longer accepts a press.
-    const int faderWidth = static_cast<int>(std::lround(kFaderWidth * widthScale_));
+    const int faderWidth = static_cast<int>(std::lround(strip::kFaderWidth * widthScale_));
 
     layout_.positionBadge = QRect(pad, y, innerWidth, kRowHeight);
     y += kRowHeight + 2;

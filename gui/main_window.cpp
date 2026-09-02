@@ -89,6 +89,12 @@ MainWindow::MainWindow(AppState* state, QWidget* parent)
         detailStack_->setCurrentIndex(0);
     });
     connect(stripRack_, &StripRack::collapsedDevicesChanged, this, [this] { saveSession(); });
+    // The two rows of faders keep the same width. Driven by a signal rather
+    // than read during applyDetailSizing, because the order in which the rack
+    // and this window handle a resize is not defined - and the rack is the one
+    // that computes the scale.
+    connect(stripRack_, &StripRack::stripWidthScaleChanged, this,
+            [this](double scale) { detailPanel_->setStripWidthScale(scale); });
     connect(stripRack_, &StripRack::statusMessage, this, [this](const QString& message) {
         // The rack's own progress and refusals go to the status bar; an empty
         // message means "nothing to say", so fall back to the selection.

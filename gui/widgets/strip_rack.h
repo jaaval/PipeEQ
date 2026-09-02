@@ -64,6 +64,9 @@ signals:
     // Human-readable progress or refusal, for the status bar.
     void statusMessage(const QString& message);
     void collapsedDevicesChanged();
+    // The strips widened or narrowed. The send strips above follow this, so the
+    // two rows of faders stay the same width.
+    void stripWidthScaleChanged(double scale);
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -102,6 +105,7 @@ private:
     // Width the strips and their block chrome want at scale 1. Recomputed in
     // rebuild().
     int naturalContentWidth_ = 0;
+    double publishedWidthScale_ = 1.0;
     QVector<QWidget*> deviceBlocks_;
     QString selectedStripId_;
     // Cluster keys marked for linking. Keyed by cluster rather than strip id so

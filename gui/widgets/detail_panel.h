@@ -34,6 +34,9 @@ public:
     explicit DetailPanel(AppState* state, QWidget* parent = nullptr);
 
     void setSelection(const QString& stripId);
+    // Match the mixer strips below, as far as the EQ's share of the window
+    // allows.
+    void setStripWidthScale(double scale);
     QString selection() const { return stripId_; }
 
     // Values changed but the input set didn't.
@@ -76,6 +79,7 @@ private:
     QLabel* sendCountLabel_ = nullptr;
 
     EqPreview* eqPreview_ = nullptr;
+    double requestedWidthScale_ = 1.0;
     bool suppressSignals_ = false;
 };
 

@@ -68,6 +68,16 @@ void StripRack::applyWidthScale() {
     for (auto it = stripWidgets_.begin(); it != stripWidgets_.end(); ++it) {
         it.value()->setWidthScale(scale);
     }
+
+    // Published so the send strips above can match. Read back off a strip
+    // rather than reported as computed, so what the panel is told is the scale
+    // actually in effect after the strip's own clamping - not a raw ratio it
+    // would then have to clamp identically and in step.
+    const double applied = stripWidgets_.begin().value()->widthScale();
+    if (applied != publishedWidthScale_) {
+        publishedWidthScale_ = applied;
+        emit stripWidthScaleChanged(applied);
+    }
 }
 
 void StripRack::resizeEvent(QResizeEvent* event) {

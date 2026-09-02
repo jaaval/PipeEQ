@@ -9,6 +9,7 @@
 #include <QWheelEvent>
 
 #include "fader_taper.h"
+#include "strip_metrics.h"
 #include "model/level_meters.h"
 #include "theme/paint_helpers.h"
 
@@ -16,7 +17,6 @@ namespace pipeeq {
 
 namespace {
 
-constexpr int kWidth = 74;
 constexpr int kRowHeight = 18;
 
 QString formatDb(double db) {
@@ -64,6 +64,12 @@ void SendStrip::changeEvent(QEvent* event) {
 
 void SendStrip::setInput(const InputRow& input) {
     input_ = input;
+    // Recomputed here as well as on resize, the way the mixer strip does it on
+    // setStrips. Depending on a resize event alone leaves the layout - and so
+    // every hit-test - empty until one arrives, which is a state the widget
+    // should not have.
+    recomputeLayout();
+    updateGeometry();
     update();
 }
 
@@ -85,12 +91,34 @@ double SendStrip::level() const {
     return hasPending_ ? pendingGainDb_ : gainDb_;
 }
 
-QSize SendStrip::sizeHint() const {
-    return QSize(kWidth, 180);
+int SendStrip::naturalWidth() {
+    return strip::kBaseWidth;
 }
 
+void SendStrip::setWidthScale(double scale) {
+    const double clamped = std::clamp(scale, 1.0, strip::kMaxWidthScale);
+    if (clamped == widthScale_) {
+        return;
+    }
+    widthScale_ = clamped;
+    updateGeometry();
+    recomputeLayout();
+    update();
+}
+
+int SendStrip::scaledWidth() const {
+    return static_cast<int>(std::lround(naturalWidth() * widthScale_));
+}
+
+QSize SendStrip::sizeHint() const {
+    return QSize(scaledWidth(), 180);
+}
+
+// The same width as the size hint: these sit in a horizontal row with a
+// trailing stretch, and letting them compress below their width would squeeze
+// the fader out from under the pointer.
 QSize SendStrip::minimumSizeHint() const {
-    return QSize(kWidth, 150);
+    return QSize(scaledWidth(), 150);
 }
 
 void SendStrip::recomputeLayout() {
@@ -105,9 +133,10 @@ void SendStrip::recomputeLayout() {
 
     const int bottomBlock = kRowHeight * 2 + 6;
     const int middleHeight = std::max(36, height() - y - bottomBlock - pad);
-    layout_.fader = QRect(pad, y, 22, middleHeight);
+    const int faderWidth = static_cast<int>(std::lround(strip::kFaderWidth * widthScale_));
+    layout_.fader = QRect(pad, y, faderWidth, middleHeight);
     layout_.meterArea = QRect(layout_.fader.right() + 3, y,
-                               std::max(8, innerWidth - 22 - 3), middleHeight);
+                               std::max(8, innerWidth - faderWidth - 3), middleHeight);
     y += middleHeight + 3;
 
     layout_.readout = QRect(pad, y, innerWidth, kRowHeight - 3);
@@ -226,7 +255,11 @@ void SendStrip::mousePressEvent(QMouseEvent* event) {
     if (!routed_) {
         return; // nothing to set a level on until it's routed
     }
-    if (layout_.fader.contains(event->pos()) || layout_.meterArea.contains(event->pos())) {
+    // The FADER only, matching the mixer strips below: the meter is a readout,
+    // and it is most of a strip's width. There is no select-first rule to apply
+    // here, though - a send strip is never the thing being selected, so a press
+    // on its fader acts at once.
+    if (layout_.fader.contains(event->pos())) {
         dragging_ = true;
         emit levelEditBegan();
         applyLevelFromY(event->pos().y());

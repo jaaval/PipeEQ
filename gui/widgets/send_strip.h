@@ -34,6 +34,16 @@ public:
 
     const QString& inputId() const { return input_.id; }
 
+    // Width at scale 1, shared with the mixer strips below - see
+    // strip_metrics.h. The detail panel widens these to match, within the room
+    // it can spare from the EQ.
+    static int naturalWidth();
+    // Exposed for the same reason the mixer strip's are: which rectangle takes
+    // a press is behaviour worth asserting against the real geometry.
+    QRect faderRect() const { return layout_.fader; }
+    QRect meterAreaRect() const { return layout_.meterArea; }
+    void setWidthScale(double scale);
+
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
     void refreshMeters();
@@ -64,8 +74,10 @@ private:
         QRect onButton;
     };
 
+    int scaledWidth() const;
     void recomputeLayout();
     void applyLevelFromY(int y);
+    double widthScale_ = 1.0;
     void commitLevel(double gainDb);
     double level() const;
 

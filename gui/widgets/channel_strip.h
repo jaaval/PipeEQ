@@ -52,6 +52,7 @@ public:
     // spare room; see StripRack::applyWidthScale.
     int naturalWidth() const;
     void setWidthScale(double scale);
+    double widthScale() const { return widthScale_; }
     static double maxWidthScale();
 
     // Where the fader and the meters are. Exposed because which of the two a

@@ -82,6 +82,7 @@ if(TARGET pipeeq-gui)
     add_executable(test_channel_strip
         test_channel_strip.cpp
         ${CMAKE_SOURCE_DIR}/gui/widgets/channel_strip.cpp
+        ${CMAKE_SOURCE_DIR}/gui/widgets/send_strip.cpp
         ${CMAKE_SOURCE_DIR}/gui/widgets/fader_taper.cpp
         ${CMAKE_SOURCE_DIR}/gui/model/level_meters.cpp
         ${CMAKE_SOURCE_DIR}/gui/theme/theme.cpp
